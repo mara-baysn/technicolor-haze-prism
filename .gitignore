@@ -1,0 +1,28 @@
+# Rust
+/target/
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node
+node_modules/
+ui/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# DOCA
+vendor/doca-sdk-*/lib/
+
+# Test artifacts
+results/
+*.json.bak

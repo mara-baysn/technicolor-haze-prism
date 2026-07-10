@@ -1,0 +1,15 @@
+[package]
+name = "prism-offload-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+prism-proto = { path = "../prism-proto" }
+prism-doca-sys = { path = "../prism-doca-sys", features = ["doca-mock"] }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+dashmap = "6"

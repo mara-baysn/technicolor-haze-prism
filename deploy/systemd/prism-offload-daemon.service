@@ -1,0 +1,14 @@
+[Unit]
+Description=Prism Session Offload Daemon
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/prism-offload-daemon --listen-addr [::]:50051
+Environment=RUST_LOG=info
+Environment=DOCA_ROOT=/opt/mellanox/doca
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

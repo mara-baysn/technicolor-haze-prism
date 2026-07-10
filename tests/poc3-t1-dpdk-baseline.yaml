@@ -1,0 +1,57 @@
+schema_version: "1.0"
+test_id: "poc3-t1-dpdk-baseline"
+title: "DPDK Forwarding Baseline — Raw VF-to-VF Throughput"
+poc_number: 3
+estimated_duration_minutes: 15
+
+hardware_targets:
+  - id: hpe_server
+    host: 192.168.9.23
+    user: almalinux
+    auth: key
+    ssh_key: ~/.ssh/id_rsa_plano_vms
+  - id: dpu1
+    host: 192.168.0.38
+    user: ubuntu
+    auth: password
+  - id: dpu2
+    host: 192.168.0.32
+    user: ubuntu
+    auth: password
+
+phases:
+  - name: setup
+    steps:
+      - target: hpe_server
+        command: "echo 32 > /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages"
+        timeout_seconds: 10
+      - target: hpe_server
+        command: "modprobe vfio-pci"
+        timeout_seconds: 10
+
+  - name: baseline_1500b
+    steps:
+      - target: hpe_server
+        command: "dpdk-testpmd -l 2-17 -n 4 -- --forward-mode=io --nb-cores=16 --txq=8 --rxq=8 --burst=32"
+        timeout_seconds: 60
+        background: true
+      - target: dpu2
+        command: "cd /opt/v3.04 && ./t-rex-64 -f cfg/trex_cfg.yaml -c 4 -m 100% --duration 30 --nc"
+        timeout_seconds: 45
+    assertions:
+      - type: numeric_gt
+        metric: "tx_gbps"
+        threshold: 20.0
+        description: "Slow-path throughput must exceed 20 Gbps at 1500B"
+
+  - name: cleanup
+    steps:
+      - target: hpe_server
+        command: "pkill -f testpmd || true"
+        timeout_seconds: 5
+
+success_criteria:
+  - metric: throughput_1500b_gbps
+    operator: gte
+    value: 20.0
+    description: "DPDK VF-to-VF forwarding at 1500B exceeds 20 Gbps"

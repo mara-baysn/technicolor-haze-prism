@@ -1,0 +1,12 @@
+[package]
+name = "prism-doca-sys"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+bindgen = "0.70"
+
+[features]
+default = []
+doca-mock = []

@@ -1,0 +1,78 @@
+syntax = "proto3";
+package prism.offload.v1;
+
+service SessionOffloadService {
+  rpc ProgramSession(ProgramSessionRequest) returns (ProgramSessionResponse);
+  rpc FlushSessions(FlushSessionsRequest) returns (FlushSessionsResponse);
+  rpc QuerySession(QuerySessionRequest) returns (QuerySessionResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message SessionKey {
+  uint32 vni = 1;
+  string src_ip = 2;
+  string dst_ip = 3;
+  uint32 src_port = 4;
+  uint32 dst_port = 5;
+  Protocol protocol = 6;
+}
+
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  PROTOCOL_TCP = 1;
+  PROTOCOL_UDP = 2;
+  PROTOCOL_ICMP = 3;
+}
+
+enum OffloadAction {
+  OFFLOAD_ACTION_UNSPECIFIED = 0;
+  OFFLOAD_ACTION_FORWARD = 1;
+  OFFLOAD_ACTION_DROP = 2;
+  OFFLOAD_ACTION_MIRROR = 3;
+}
+
+message ProgramSessionRequest {
+  SessionKey key = 1;
+  OffloadAction action = 2;
+  bool bidirectional = 3;
+  uint32 forward_port = 4;
+  string rule_id = 5;
+}
+
+message ProgramSessionResponse {
+  bool success = 1;
+  string entry_handle = 2;
+  string error_message = 3;
+}
+
+message FlushSessionsRequest {
+  oneof match_criteria {
+    string rule_id = 1;
+    uint32 vni = 2;
+    bool all = 3;
+  }
+}
+
+message FlushSessionsResponse {
+  uint32 flushed_count = 1;
+}
+
+message QuerySessionRequest {
+  SessionKey key = 1;
+}
+
+message QuerySessionResponse {
+  bool found = 1;
+  uint64 packets_matched = 2;
+  uint64 bytes_matched = 3;
+  uint64 age_seconds = 4;
+  bool offloaded = 5;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  uint64 active_sessions = 2;
+  uint64 uptime_seconds = 3;
+}
