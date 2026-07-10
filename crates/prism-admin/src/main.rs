@@ -1,6 +1,10 @@
 use axum::Router;
 use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
+
+use prism_admin::reconciler::Reconciler;
+use prism_admin::store::AppStore;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -11,8 +15,16 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("prism-admin starting on :8443");
 
+    let store = AppStore::new();
+
+    // Spawn the background reconciler
+    let reconciler = Reconciler::new(store.clone());
+    reconciler.spawn();
+
     let app = Router::new()
-        .nest("/api/v1", api::router())
+        .route("/health", axum::routing::get(health))
+        .nest("/api/v1", prism_admin::api::router(store))
+        .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8443").await?;
@@ -21,15 +33,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-mod api {
-    use axum::Router;
-
-    pub fn router() -> Router {
-        Router::new()
-            .route("/health", axum::routing::get(health))
-    }
-
-    async fn health() -> &'static str {
-        "ok"
-    }
+async fn health() -> &'static str {
+    "ok"
 }

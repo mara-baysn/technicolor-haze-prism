@@ -8,8 +8,12 @@ prism-proto = { path = "../prism-proto" }
 prism-doca-sys = { path = "../prism-doca-sys", features = ["doca-mock"] }
 tokio = { workspace = true }
 tonic = { workspace = true }
+prost = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 dashmap = "6"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

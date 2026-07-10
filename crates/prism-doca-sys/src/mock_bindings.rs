@@ -26,17 +26,36 @@ pub struct doca_flow_query {
     pub total_bytes: u64,
 }
 
-// Stub functions
+/// # Safety
+/// Mock stub — no actual unsafe operations.
 pub unsafe fn doca_flow_init(_cfg: *const std::ffi::c_void) -> doca_error_t { DOCA_SUCCESS }
+
+/// # Safety
+/// Mock stub — no actual unsafe operations.
 pub unsafe fn doca_flow_destroy() {}
+
+/// # Safety
+/// Mock stub — no actual unsafe operations.
 pub unsafe fn doca_flow_port_start(_cfg: *const std::ffi::c_void) -> *mut doca_flow_port { std::ptr::null_mut() }
+
+/// # Safety
+/// Mock stub — no actual unsafe operations.
 pub unsafe fn doca_flow_pipe_create(_cfg: *const std::ffi::c_void) -> *mut doca_flow_pipe { std::ptr::null_mut() }
+
+/// # Safety
+/// Mock stub — no actual unsafe operations.
 pub unsafe fn doca_flow_pipe_add_entry(
     _pipe: *mut doca_flow_pipe,
     _match_: *const std::ffi::c_void,
     _actions: *const std::ffi::c_void,
 ) -> *mut doca_flow_pipe_entry { std::ptr::null_mut() }
+
+/// # Safety
+/// Mock stub — no actual unsafe operations.
 pub unsafe fn doca_flow_pipe_rm_entry(_entry: *mut doca_flow_pipe_entry) -> doca_error_t { DOCA_SUCCESS }
+
+/// # Safety
+/// Mock stub — caller must ensure `query` points to valid writable memory.
 pub unsafe fn doca_flow_query_entry(_entry: *mut doca_flow_pipe_entry, query: *mut doca_flow_query) -> doca_error_t {
     if !query.is_null() {
         (*query).total_pkts = 0;
