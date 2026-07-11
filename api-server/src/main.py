@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import random
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -229,12 +228,16 @@ async def metrics_websocket(websocket: WebSocket):
 async def metrics_broadcaster():
     """Broadcast metrics to all connected WebSocket clients at 1Hz.
 
-    Uses MetricsCollector for data (which falls back to mock if hardware unavailable).
+    Only reports real data. Zeros when hardware is unreachable.
     """
     while True:
         if connected_clients:
             try:
                 snapshot = await metrics_collector.collect()
+            except Exception:
+                snapshot = None
+
+            if snapshot:
                 message = json.dumps({
                     "tx_gbps": snapshot.tx_gbps,
                     "rx_gbps": snapshot.rx_gbps,
@@ -245,14 +248,13 @@ async def metrics_broadcaster():
                     "new_flows_per_sec": snapshot.new_flows_per_sec,
                     "offloaded_flows": snapshot.offloaded_flows,
                 })
-            except Exception:
-                # Fallback to basic mock if collector fails entirely
+            else:
                 message = json.dumps({
-                    "tx_gbps": 40 + random.random() * 60,
-                    "rx_gbps": 38 + random.random() * 58,
-                    "offload_ratio_pct": current_offload_ratio + random.uniform(-2, 2),
-                    "active_sessions": random.randint(1_000_000, 2_000_000),
-                    "vm_cpu_pct": 25 + random.random() * 20,
+                    "tx_gbps": 0.0,
+                    "rx_gbps": 0.0,
+                    "offload_ratio_pct": 0.0,
+                    "active_sessions": 0,
+                    "vm_cpu_pct": 0.0,
                 })
 
             disconnected = set()
