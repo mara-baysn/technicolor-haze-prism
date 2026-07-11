@@ -1,12 +1,15 @@
 import asyncio
 import json
 import logging
+import os
 import random
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -260,3 +263,23 @@ async def metrics_broadcaster():
                     disconnected.add(client)
             connected_clients.difference_update(disconnected)
         await asyncio.sleep(1.0)
+
+
+# ============================================================
+# Static UI Serving (must be last — catch-all for SPA routing)
+# ============================================================
+
+_ui_dir = os.environ.get("PRISM_UI_DIR", "")
+if _ui_dir:
+    _ui_path = Path(_ui_dir).expanduser().resolve()
+    if _ui_path.is_dir():
+        # Serve static assets (JS, CSS, images)
+        app.mount("/assets", StaticFiles(directory=str(_ui_path / "assets")), name="ui-assets")
+
+        @app.get("/{full_path:path}")
+        async def serve_spa(full_path: str):
+            """Serve the SPA index.html for any non-API route."""
+            file_path = _ui_path / full_path
+            if file_path.is_file():
+                return FileResponse(str(file_path))
+            return FileResponse(str(_ui_path / "index.html"))
