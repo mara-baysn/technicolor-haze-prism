@@ -1,0 +1,41 @@
+kind: "poc-test-definition/v1"
+metadata:
+  id: "T2"
+  name: "Single Session Offload — Hardware Bypass Verification"
+  description: "Verifies that a single offloaded session bypasses the VM and flows directly through DPU hardware"
+  poc_number: 3
+  estimated_duration_minutes: 10
+
+hardware_targets:
+  - id: hpe_server
+    host: 192.168.9.23
+    user: almalinux
+    auth: key
+    ssh_key: ~/.ssh/id_rsa_plano_vms
+  - id: dpu1
+    host: 192.168.0.38
+    user: ubuntu
+    auth: password
+
+setup:
+  - target: dpu1
+    command: "echo 'Programming single session offload entry via gRPC'"
+    timeout: 10
+
+steps:
+  - target: hpe_server
+    command: "echo 'Verifying traffic bypasses VM for offloaded session'"
+    timeout: 30
+  - target: dpu1
+    command: "echo 'Checking DPU hardware counters for bypass confirmation'"
+    timeout: 15
+
+assertions:
+  - type: exit_code
+    expected: 0
+    description: "Session offload programming and bypass verification succeeds"
+
+cleanup:
+  - target: dpu1
+    command: "echo 'Flushing offloaded session'"
+    timeout: 5

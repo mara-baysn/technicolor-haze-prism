@@ -1,0 +1,63 @@
+kind: "poc-test-definition/v1"
+metadata:
+  id: "T9"
+  name: "Session Eviction — Zero-Loss Graceful Removal"
+  description: "Evicts offloaded sessions under active traffic, verifying zero packet loss during fallback to slow-path"
+  poc_number: 3
+  estimated_duration_minutes: 12
+
+hardware_targets:
+  - id: hpe_server
+    host: 192.168.9.23
+    user: almalinux
+    auth: key
+    ssh_key: ~/.ssh/id_rsa_plano_vms
+  - id: dpu1
+    host: 192.168.0.38
+    user: ubuntu
+    auth: password
+  - id: dpu2
+    host: 192.168.0.32
+    user: ubuntu
+    auth: password
+
+setup:
+  - target: dpu1
+    command: "echo 'Programming 500 offloaded sessions for eviction test'"
+    timeout: 15
+  - target: dpu2
+    command: "echo 'Starting continuous traffic across all 500 sessions'"
+    timeout: 10
+
+steps:
+  - target: dpu1
+    command: "echo 'Evicting single session while traffic active — monitoring for drops'"
+    timeout: 20
+  - target: hpe_server
+    command: "echo 'Verifying evicted session falls back to slow-path without loss'"
+    timeout: 20
+  - target: dpu1
+    command: "echo 'Bulk-evicting 100 sessions simultaneously'"
+    timeout: 20
+  - target: hpe_server
+    command: "echo 'Verifying all 100 evicted sessions fall back gracefully'"
+    timeout: 20
+  - target: dpu2
+    command: "echo 'Confirming traffic continuity across eviction events'"
+    timeout: 15
+  - target: hpe_server
+    command: "echo 'Checking packet counters for zero-loss across eviction'"
+    timeout: 10
+
+assertions:
+  - type: exit_code
+    expected: 0
+    description: "Zero packet loss during session eviction verified"
+
+cleanup:
+  - target: dpu1
+    command: "echo 'Flushing remaining offload entries'"
+    timeout: 10
+  - target: dpu2
+    command: "echo 'Stopping traffic generators'"
+    timeout: 5

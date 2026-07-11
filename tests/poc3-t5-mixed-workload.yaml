@@ -1,0 +1,54 @@
+kind: "poc-test-definition/v1"
+metadata:
+  id: "T5"
+  name: "Mixed Workload — 80% Bulk + 20% Short-lived"
+  description: "Validates correct traffic separation: bulk elephant flows offloaded to hardware, short-lived mice flows in slow-path"
+  poc_number: 3
+  estimated_duration_minutes: 15
+
+hardware_targets:
+  - id: hpe_server
+    host: 192.168.9.23
+    user: almalinux
+    auth: key
+    ssh_key: ~/.ssh/id_rsa_plano_vms
+  - id: dpu1
+    host: 192.168.0.38
+    user: ubuntu
+    auth: password
+  - id: dpu2
+    host: 192.168.0.32
+    user: ubuntu
+    auth: password
+
+setup:
+  - target: hpe_server
+    command: "echo 'Configuring mixed workload profile: 80% bulk elephant flows, 20% short-lived mice'"
+    timeout: 10
+  - target: dpu1
+    command: "echo 'Programming offload rules for bulk flows only'"
+    timeout: 10
+
+steps:
+  - target: dpu2
+    command: "echo 'Starting TRex mixed profile: 80% 1500B bulk + 20% 64B short-lived'"
+    timeout: 60
+  - target: hpe_server
+    command: "echo 'Monitoring per-flow throughput and latency distribution'"
+    timeout: 60
+  - target: dpu1
+    command: "echo 'Verifying bulk flows are offloaded, short-lived stay in slow-path'"
+    timeout: 15
+
+assertions:
+  - type: exit_code
+    expected: 0
+    description: "Mixed workload traffic separation is correct"
+
+cleanup:
+  - target: dpu1
+    command: "echo 'Flushing offload entries'"
+    timeout: 5
+  - target: hpe_server
+    command: "echo 'Stopping traffic generators'"
+    timeout: 5

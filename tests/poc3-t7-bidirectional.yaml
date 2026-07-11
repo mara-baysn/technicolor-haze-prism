@@ -1,0 +1,57 @@
+kind: "poc-test-definition/v1"
+metadata:
+  id: "T7"
+  name: "Bidirectional Flow Handling — North-South + South-North"
+  description: "Tests simultaneous north-south and south-north traffic at line rate, verifying symmetric performance"
+  poc_number: 3
+  estimated_duration_minutes: 12
+
+hardware_targets:
+  - id: hpe_server
+    host: 192.168.9.23
+    user: almalinux
+    auth: key
+    ssh_key: ~/.ssh/id_rsa_plano_vms
+  - id: dpu1
+    host: 192.168.0.38
+    user: ubuntu
+    auth: password
+  - id: dpu2
+    host: 192.168.0.32
+    user: ubuntu
+    auth: password
+
+setup:
+  - target: dpu1
+    command: "echo 'Programming bidirectional offload entries (N-S and S-N)'"
+    timeout: 10
+  - target: hpe_server
+    command: "echo 'Configuring bidirectional traffic generators'"
+    timeout: 10
+
+steps:
+  - target: dpu2
+    command: "echo 'Generating north-to-south traffic at line rate'"
+    timeout: 30
+  - target: hpe_server
+    command: "echo 'Measuring N-S throughput and latency'"
+    timeout: 30
+  - target: hpe_server
+    command: "echo 'Generating south-to-north return traffic at line rate'"
+    timeout: 30
+  - target: dpu2
+    command: "echo 'Running simultaneous bidirectional traffic at full rate'"
+    timeout: 30
+  - target: hpe_server
+    command: "echo 'Measuring aggregate bidirectional throughput'"
+    timeout: 30
+
+assertions:
+  - type: exit_code
+    expected: 0
+    description: "Bidirectional traffic flows without drops, N-S and S-N within 5% of each other"
+
+cleanup:
+  - target: dpu1
+    command: "echo 'Flushing bidirectional offload entries'"
+    timeout: 5

@@ -1,0 +1,50 @@
+kind: "poc-test-definition/v1"
+metadata:
+  id: "T8"
+  name: "Offload Programming Latency — p99 Measurement"
+  description: "Measures per-entry offload programming latency over 1000 sequential entries, targeting p99 under 5ms"
+  poc_number: 3
+  estimated_duration_minutes: 10
+
+hardware_targets:
+  - id: hpe_server
+    host: 192.168.9.23
+    user: almalinux
+    auth: key
+    ssh_key: ~/.ssh/id_rsa_plano_vms
+  - id: dpu1
+    host: 192.168.0.38
+    user: ubuntu
+    auth: password
+
+setup:
+  - target: dpu1
+    command: "echo 'Preparing offload latency measurement — clearing existing entries'"
+    timeout: 10
+  - target: hpe_server
+    command: "echo 'Starting high-resolution timer for offload programming latency'"
+    timeout: 5
+
+steps:
+  - target: dpu1
+    command: "echo 'Programming 1000 offload entries sequentially, measuring per-entry latency'"
+    timeout: 60
+  - target: hpe_server
+    command: "echo 'Recording timestamps for each offload ack via gRPC'"
+    timeout: 60
+  - target: dpu1
+    command: "echo 'Programming 100 entries in single burst, measuring batch latency'"
+    timeout: 30
+  - target: hpe_server
+    command: "echo 'Computing p50, p95, p99 latency from measurements'"
+    timeout: 10
+
+assertions:
+  - type: exit_code
+    expected: 0
+    description: "Latency measurement completes for all entries"
+
+cleanup:
+  - target: dpu1
+    command: "echo 'Flushing measurement entries'"
+    timeout: 5
