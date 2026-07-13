@@ -62,7 +62,7 @@ export default function TopologyDiagram() {
         <text x="400" y="38" textAnchor="middle" fill="#f59e0b" fontSize="11" fontWeight="bold">BlueField-3 DPU</text>
         <text x="400" y="55" textAnchor="middle" fill="#94a3b8" fontSize="9">Prism Firewall</text>
         <text x="400" y="72" textAnchor="middle" fill="#6b7280" fontSize="8">
-          {offloadPct.toFixed(0)}% HW offload
+          {(offloadPct ?? 0).toFixed(0)} rules active
         </text>
 
         {/* VF3 - Receiver */}

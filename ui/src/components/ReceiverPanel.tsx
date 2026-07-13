@@ -40,7 +40,7 @@ export default function ReceiverPanel() {
   const isRunning = stats?.running ?? false
 
   // Find max connections for scaling bars
-  const maxConns = Math.max(...ports.map((p) => p.connections), 1)
+  const maxConns = Math.max(...ports.map((p) => p.connections ?? 0), 1)
 
   return (
     <div className="flex flex-col h-full">
@@ -83,7 +83,7 @@ export default function ReceiverPanel() {
         <div className="text-xs text-gray-400 uppercase tracking-wider mb-2">Per-Port Connections</div>
         <div className="space-y-2">
           {ports.map((portStat) => {
-            const pct = maxConns > 0 ? (portStat.connections / maxConns) * 100 : 0
+            const pct = maxConns > 0 ? ((portStat.connections ?? 0) / maxConns) * 100 : 0
             const barColor = getPortColor(portStat.port)
             const label = PORT_LABELS[portStat.port] ?? ''
 
@@ -98,7 +98,7 @@ export default function ReceiverPanel() {
                   </span>
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-mono text-gray-400">
-                      {portStat.connections.toLocaleString()} conn
+                      {(portStat.connections ?? 0).toLocaleString()} conn
                     </span>
                     <span className={`w-2 h-2 rounded-full ${portStat.active ? 'bg-green-400 animate-pulse' : 'bg-gray-600'}`} />
                   </div>
@@ -123,8 +123,9 @@ export default function ReceiverPanel() {
   )
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)}MB`
-  if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(1)}KB`
-  return `${bytes}B`
+function formatBytes(bytes: number | undefined | null): string {
+  const b = bytes ?? 0
+  if (b >= 1_000_000) return `${(b / 1_000_000).toFixed(1)}MB`
+  if (b >= 1_000) return `${(b / 1_000).toFixed(1)}KB`
+  return `${b}B`
 }

@@ -84,7 +84,7 @@ export default function TrafficGenPanel() {
         </div>
         {aggregate && (
           <div className="text-xs text-gray-500 mt-2">
-            {aggregate.connections_per_sec.toFixed(1)} conn/s | {aggregate.elapsed_s.toFixed(0)}s elapsed
+            {(aggregate.connections_per_sec ?? 0).toFixed(1)} conn/s | {(aggregate.elapsed_s ?? 0).toFixed(0)}s elapsed
           </div>
         )}
       </div>
@@ -94,14 +94,17 @@ export default function TrafficGenPanel() {
         <div className="text-xs text-gray-400 uppercase tracking-wider mb-2">Per-Port Stats</div>
         <div className="space-y-1">
           {perPort.map((ps) => {
-            const successRate = ps.attempted > 0 ? (ps.succeeded / ps.attempted * 100) : 0
+            const attempted = ps.attempted ?? 0
+            const succeeded = ps.succeeded ?? 0
+            const failed = ps.failed ?? 0
+            const successRate = attempted > 0 ? (succeeded / attempted * 100) : 0
             return (
               <div key={ps.port} className="flex items-center justify-between bg-gray-800/40 rounded px-3 py-1.5">
                 <span className="text-sm font-mono text-gray-300">:{ps.port}</span>
                 <div className="flex items-center gap-3 text-xs font-mono">
-                  <span className="text-green-400">{ps.succeeded}</span>
+                  <span className="text-green-400">{succeeded}</span>
                   <span className="text-gray-500">/</span>
-                  <span className="text-red-400">{ps.failed}</span>
+                  <span className="text-red-400">{failed}</span>
                   <span className={`px-1.5 py-0.5 rounded ${
                     successRate === 100 ? 'bg-green-900/40 text-green-300' :
                     successRate === 0 ? 'bg-red-900/40 text-red-300' :

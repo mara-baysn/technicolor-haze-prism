@@ -25,10 +25,10 @@ export default function FirewallPanel() {
 
   const loadRules = useCallback(async () => {
     try {
-      const r = await firewallApi.getRules()
-      setRules(Array.isArray(r) ? r : [])
+      const res = await firewallApi.getRules()
+      setRules(Array.isArray(res.rules) ? res.rules : [])
       setError(null)
-    } catch (e) {
+    } catch (_e) {
       setError('Failed to load rules')
     }
   }, [])
@@ -44,7 +44,7 @@ export default function FirewallPanel() {
       })
       await loadRules()
       setError(null)
-    } catch (e) {
+    } catch (_e) {
       setError('Failed to add rule')
     } finally {
       setRulesLoading(false)
@@ -56,14 +56,14 @@ export default function FirewallPanel() {
     try {
       // Delete all deny rules
       const denyRules = rules.filter(
-        (r) => r.action.toUpperCase() === 'DENY'
+        (r) => (r.action ?? '').toUpperCase() === 'DENY'
       )
       for (const rule of denyRules) {
         await firewallApi.deleteRule(rule.id)
       }
       await loadRules()
       setError(null)
-    } catch (e) {
+    } catch (_e) {
       setError('Failed to remove rules')
     } finally {
       setRulesLoading(false)
@@ -76,7 +76,7 @@ export default function FirewallPanel() {
       try {
         await firewallApi.deleteRule(ruleId)
         await loadRules()
-      } catch (e) {
+      } catch (_e) {
         setError('Failed to delete rule')
       } finally {
         setRulesLoading(false)
@@ -166,11 +166,11 @@ export default function FirewallPanel() {
               <div className="flex items-center gap-2">
                 <span
                   className={`w-2 h-2 rounded-full ${
-                    rule.action.toUpperCase() === 'DENY' ? 'bg-red-400' : 'bg-green-400'
+                    (rule.action ?? '').toUpperCase() === 'DENY' ? 'bg-red-400' : 'bg-green-400'
                   }`}
                 />
                 <span className="text-sm text-gray-200">
-                  {rule.action.toUpperCase()} {rule.protocol}
+                  {(rule.action ?? 'ALLOW').toUpperCase()} {rule.protocol ?? ''}
                   {rule.dst_port ? `:${rule.dst_port}` : ''}
                 </span>
                 {rule.in_hw && (

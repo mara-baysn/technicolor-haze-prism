@@ -138,9 +138,18 @@ async def get_firewall_health():
 @app.get("/api/generator/stats")
 async def get_generator_stats():
     """Get traffic generator statistics."""
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        resp = await client.get(f"{GENERATOR_URL}/api/stats")
-        return resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{GENERATOR_URL}/api/stats")
+            if resp.status_code != 200:
+                return {"error": f"generator returned {resp.status_code}", "body": resp.text}
+            return resp.json()
+    except httpx.TimeoutException:
+        return {"error": "generator timeout", "url": f"{GENERATOR_URL}/api/stats"}
+    except httpx.ConnectError as e:
+        return {"error": "generator connection refused", "detail": str(e)}
+    except Exception as e:
+        return {"error": "generator proxy error", "detail": str(e)}
 
 
 @app.post("/api/generator/start")
@@ -152,17 +161,35 @@ async def start_generator(req: GeneratorStartRequest | None = None):
             body["profile"] = req.profile
         if req.rate:
             body["rate"] = req.rate
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        resp = await client.post(f"{GENERATOR_URL}/api/start", json=body)
-        return resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(f"{GENERATOR_URL}/api/start", json=body)
+            if resp.status_code != 200:
+                return {"error": f"generator returned {resp.status_code}", "body": resp.text}
+            return resp.json()
+    except httpx.TimeoutException:
+        return {"error": "generator timeout", "url": f"{GENERATOR_URL}/api/start"}
+    except httpx.ConnectError as e:
+        return {"error": "generator connection refused", "detail": str(e)}
+    except Exception as e:
+        return {"error": "generator proxy error", "detail": str(e)}
 
 
 @app.post("/api/generator/stop")
 async def stop_generator():
     """Stop the traffic generator."""
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        resp = await client.post(f"{GENERATOR_URL}/api/stop")
-        return resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(f"{GENERATOR_URL}/api/stop")
+            if resp.status_code != 200:
+                return {"error": f"generator returned {resp.status_code}", "body": resp.text}
+            return resp.json()
+    except httpx.TimeoutException:
+        return {"error": "generator timeout", "url": f"{GENERATOR_URL}/api/stop"}
+    except httpx.ConnectError as e:
+        return {"error": "generator connection refused", "detail": str(e)}
+    except Exception as e:
+        return {"error": "generator proxy error", "detail": str(e)}
 
 
 # ============================================================
@@ -173,9 +200,52 @@ async def stop_generator():
 @app.get("/api/receiver/stats")
 async def get_receiver_stats():
     """Get receiver statistics."""
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        resp = await client.get(f"{RECEIVER_URL}/api/stats")
-        return resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{RECEIVER_URL}/api/stats")
+            if resp.status_code != 200:
+                return {"error": f"receiver returned {resp.status_code}", "body": resp.text}
+            return resp.json()
+    except httpx.TimeoutException:
+        return {"error": "receiver timeout", "url": f"{RECEIVER_URL}/api/stats"}
+    except httpx.ConnectError as e:
+        return {"error": "receiver connection refused", "detail": str(e)}
+    except Exception as e:
+        return {"error": "receiver proxy error", "detail": str(e)}
+
+
+@app.get("/api/receiver/health")
+async def get_receiver_health():
+    """Check receiver health."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{RECEIVER_URL}/health")
+            if resp.status_code != 200:
+                return {"error": f"receiver returned {resp.status_code}", "body": resp.text}
+            return resp.json()
+    except httpx.TimeoutException:
+        return {"error": "receiver timeout", "url": f"{RECEIVER_URL}/health"}
+    except httpx.ConnectError as e:
+        return {"error": "receiver connection refused", "detail": str(e)}
+    except Exception as e:
+        return {"error": "receiver proxy error", "detail": str(e)}
+
+
+@app.get("/api/generator/health")
+async def get_generator_health():
+    """Check generator health."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{GENERATOR_URL}/health")
+            if resp.status_code != 200:
+                return {"error": f"generator returned {resp.status_code}", "body": resp.text}
+            return resp.json()
+    except httpx.TimeoutException:
+        return {"error": "generator timeout", "url": f"{GENERATOR_URL}/health"}
+    except httpx.ConnectError as e:
+        return {"error": "generator connection refused", "detail": str(e)}
+    except Exception as e:
+        return {"error": "generator proxy error", "detail": str(e)}
 
 
 # ============================================================

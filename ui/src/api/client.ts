@@ -106,12 +106,22 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 // Firewall API (proxied through orchestrator -> DPU)
 export const firewallApi = {
-  getRules(): Promise<FirewallRule[]> {
-    return fetchJson(`${API_BASE}/firewall/rules`)
+  async getRules(): Promise<{ rules: FirewallRule[]; count: number; default_policy: string }> {
+    const res = await fetchJson<{ rules: FirewallRule[]; count: number; default_policy: string } | FirewallRule[]>(
+      `${API_BASE}/firewall/rules`
+    )
+    // Handle both response shapes: array or {rules, count, default_policy}
+    if (Array.isArray(res)) {
+      return { rules: res, count: res.length, default_policy: 'deny-all' }
+    }
+    return res
   },
 
   addRule(rule: {
     dst_port?: number
+    src_port?: number
+    dst_ip?: string
+    src_ip?: string
     protocol?: string
     action?: string
     priority?: number
@@ -125,6 +135,12 @@ export const firewallApi = {
 
   deleteRule(ruleId: string): Promise<unknown> {
     return fetchJson(`${API_BASE}/firewall/rules/${ruleId}`, {
+      method: 'DELETE',
+    })
+  },
+
+  flushRules(): Promise<unknown> {
+    return fetchJson(`${API_BASE}/firewall/rules`, {
       method: 'DELETE',
     })
   },
