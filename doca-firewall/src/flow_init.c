@@ -117,9 +117,16 @@ static doca_error_t create_post_ct_pipe(struct doca_flow_port *port,
         return result;
     }
 
-    result = set_flow_pipe_cfg(cfg, "POST_CT_FWD_PIPE", DOCA_FLOW_PIPE_BASIC, false);
+    result = set_flow_pipe_cfg(cfg, "POST_CT_FWD_PIPE", DOCA_FLOW_PIPE_BASIC, true);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to set post-CT pipe cfg: %s", doca_error_get_descr(result));
+        goto destroy_cfg;
+    }
+
+    /* EGRESS domain: FWD_PORT delivers to host VF via PCIe (not DPDK RX queue) */
+    result = doca_flow_pipe_cfg_set_domain(cfg, DOCA_FLOW_PIPE_DOMAIN_EGRESS);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set EGRESS domain: %s", doca_error_get_descr(result));
         goto destroy_cfg;
     }
 

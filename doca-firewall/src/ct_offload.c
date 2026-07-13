@@ -247,11 +247,14 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
     DOCA_LOG_INFO("CT OFFLOADED: %s:%u -> %s:%u proto=%u (VF0<->VF3)",
                   src_str, src_port, dst_str, dst_port, protocol);
 
-    /* First packet: TX via switch port (port 0). The eSwitch will deliver based on
-     * the CT entry we just created (which has FWD_PORT=4 for VF3).
-     * But the first packet itself won't match CT yet (just created), so we TX it
-     * back out port 0 and let the post-CT pipe or FDB deliver it. */
-    rte_pktmbuf_free(pkt);  /* Drop first pkt — TCP retransmit will use CT HIT path */
+    /* Forward first packet to VF3 via TX on port 4 (relay path).
+     * In switch mode, TX on a representor port delivers to the host VF. */
+    uint16_t tx_port = 4;  /* VF3 representor */
+    uint16_t nb_tx = rte_eth_tx_burst(tx_port, 0, &pkt, 1);
+    if (nb_tx == 0) {
+        DOCA_LOG_WARN("TX first packet to port %u failed", tx_port);
+        rte_pktmbuf_free(pkt);
+    }
 }
 
 void ct_offload_main_loop(struct ct_offload_ctx *ctx)
@@ -259,20 +262,33 @@ void ct_offload_main_loop(struct ct_offload_ctx *ctx)
     struct rte_mbuf *pkts[PACKET_BURST];
     int nb_rx;
 
-    DOCA_LOG_INFO("Starting switch-mode main loop (RX on switch port 0, CT MISS path)");
+    DOCA_LOG_INFO("Starting firewall main loop (MISS on port 0 + relay on ports 1-4)");
 
     while (ctx->running) {
-        /* Poll switch port (port 0) for CT MISS packets */
+        /* 1. Poll switch port (port 0) for CT MISS packets — policy decisions */
         nb_rx = rte_eth_rx_burst(0, 0, pkts, PACKET_BURST);
-        if (nb_rx == 0) {
-            usleep(10);
-            continue;
+        if (nb_rx > 0) {
+            atomic_fetch_add(&ctx->metrics->rx_bursts, 1);
+            for (int i = 0; i < nb_rx; i++) {
+                ct_offload_process_packet(ctx, pkts[i], 0);
+            }
         }
 
-        atomic_fetch_add(&ctx->metrics->rx_bursts, 1);
+        /* 2. Relay: poll VF representor ports and TX back (delivers to host VF).
+         * CT HIT packets arrive at rep port's DPDK RX; TX on same port delivers to host.
+         * This gives us 100G for bulk traffic on 1-2 ARM cores. */
+        for (uint16_t p = 1; p < ctx->flow_ctx->nb_ports && p < 5; p++) {
+            int nb_relay = rte_eth_rx_burst(p, 0, pkts, PACKET_BURST);
+            if (nb_relay > 0) {
+                uint16_t sent = rte_eth_tx_burst(p, 0, pkts, nb_relay);
+                /* Free any unsent packets */
+                for (uint16_t u = sent; u < nb_relay; u++)
+                    rte_pktmbuf_free(pkts[u]);
+            }
+        }
 
-        for (int i = 0; i < nb_rx; i++) {
-            ct_offload_process_packet(ctx, pkts[i], 0);
+        if (nb_rx == 0) {
+            /* Brief pause only when no MISS packets (relay is always fast) */
         }
 
         /* Process any pending CT entries on port 0 (switch port) */
