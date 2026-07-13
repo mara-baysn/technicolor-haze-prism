@@ -1,84 +1,68 @@
+"""Prism API orchestrator — proxies to the live DPU firewall, traffic generator, and receiver.
+
+Provides a unified API surface for the React dashboard:
+- /api/firewall/* -> DPU tc-flower daemon at 192.168.0.38:8443
+- /api/generator/* -> traffic-gen at 192.168.9.23:5001
+- /api/receiver/* -> receiver at 192.168.9.23:5002
+- /ws/metrics -> polls all 3 services every 1s, pushes unified snapshot
+"""
+
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Optional
 
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pathlib import Path
 from pydantic import BaseModel
 
-from .metrics_collector import MetricsCollector, MetricsSnapshot
-from .report_generator import ReportConfig, ReportGenerator
-from .ssh_executor import SSHExecutor
-from .test_runner import TestResult, TestRunner, TestStatus
-from .trex_driver import TRexDriver
-
 logger = logging.getLogger(__name__)
+
+# --- Service URLs ---
+
+FIREWALL_URL = os.environ.get("PRISM_FIREWALL_URL", "http://192.168.0.38:8443")
+GENERATOR_URL = os.environ.get("PRISM_GENERATOR_URL", "http://192.168.9.23:5001")
+RECEIVER_URL = os.environ.get("PRISM_RECEIVER_URL", "http://192.168.9.23:5002")
 
 
 # --- Pydantic models ---
 
-
-class OffloadRatioRequest(BaseModel):
-    ratio: float
-
-
-class TestInfo(BaseModel):
-    id: str
-    name: str
-    status: str = "ready"
-
-
-class ReportRequest(BaseModel):
-    title: Optional[str] = None
-    include_charts: bool = True
+class FirewallRuleRequest(BaseModel):
+    dst_port: int | None = None
+    src_port: int | None = None
+    dst_ip: str | None = None
+    src_ip: str | None = None
+    protocol: str = "tcp"
+    action: str = "DENY"
+    priority: int = 10
 
 
-# --- Static test list (for backward compat with dashboard) ---
+class GeneratorStartRequest(BaseModel):
+    profile: str | None = None
+    rate: int | None = None
 
-TESTS = [
-    TestInfo(id="T1", name="DPDK Baseline"),
-    TestInfo(id="T2", name="Single Session Offload"),
-    TestInfo(id="T3", name="Offload Ratio Sweep"),
-    TestInfo(id="T4", name="Connection Storm"),
-    TestInfo(id="T5", name="Mixed Workload"),
-    TestInfo(id="T6", name="RSS Validation"),
-    TestInfo(id="T7", name="Bidirectional"),
-    TestInfo(id="T8", name="Offload Latency"),
-    TestInfo(id="T9", name="Session Eviction"),
-    TestInfo(id="T10", name="30-min Sustained"),
-]
 
 # --- Shared state ---
 
 connected_clients: set[WebSocket] = set()
-current_offload_ratio = 80.0
-
-# Module instances — initialized eagerly so endpoints work even without lifespan
-ssh_executor = SSHExecutor()
-trex_driver = TRexDriver()
-metrics_collector = MetricsCollector(ssh_executor, trex_driver)
-test_runner = TestRunner(ssh_executor, tests_dir="tests/")
-report_generator = ReportGenerator(ReportConfig())
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start metrics broadcaster
+    """Start the metrics broadcaster on app startup."""
     task = asyncio.create_task(metrics_broadcaster())
     yield
-
-    # Cleanup
     task.cancel()
-    await ssh_executor.disconnect_all()
 
 
-app = FastAPI(title="Prism API Server", lifespan=lifespan)
+app = FastAPI(title="Prism API Orchestrator", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -88,167 +72,120 @@ app.add_middleware(
 
 
 # ============================================================
-# Health & Basic Endpoints
+# Health
 # ============================================================
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
-
-
-@app.get("/api/tests")
-async def list_tests() -> list[TestInfo]:
-    return TESTS
-
-
-@app.post("/api/tests/{test_id}/start")
-async def start_test(test_id: str):
-    return {"test_id": test_id, "status": "started"}
-
-
-@app.post("/api/controls/offload-ratio")
-async def set_offload_ratio(req: OffloadRatioRequest):
-    global current_offload_ratio
-    current_offload_ratio = req.ratio
-    return {"offload_ratio": current_offload_ratio}
-
-
-traffic_running = False
-
-
-@app.post("/api/controls/traffic/start")
-async def start_traffic():
-    global traffic_running
-    traffic_running = True
-    connected = await trex_driver.connect()
-    if connected:
-        await trex_driver.start()
-    return {"status": "started", "trex_connected": connected}
-
-
-@app.post("/api/controls/traffic/stop")
-async def stop_traffic():
-    global traffic_running
-    traffic_running = False
-    if trex_driver.is_running:
-        await trex_driver.stop()
-    return {"status": "stopped"}
-
-
-@app.get("/api/controls/traffic/status")
-async def traffic_status():
-    return {"running": traffic_running, "trex_connected": trex_driver.is_connected}
-
-
-@app.post("/api/controls/wan-profile")
-async def set_wan_profile(req: dict):
-    profile = req.get("profile", "clean")
-    return {"profile": profile, "applied": True}
+    """Health check for the orchestrator itself."""
+    return {"status": "ok", "service": "prism-orchestrator"}
 
 
 # ============================================================
-# Test Runner Endpoints
+# Firewall Proxy (DPU at 192.168.0.38:8443)
 # ============================================================
 
 
-@app.post("/api/tests/{test_id}/run")
-async def run_test(test_id: str):
-    """Execute a test by ID. Returns mock result if SSH unavailable."""
-    if test_runner.is_running:
-        return {
-            "error": "A test is already running",
-            "running_test": test_runner.running_test_id,
-        }
-
-    # Run test in background task so we can return immediately
-    result = await test_runner.run_test(test_id)
-    return result.to_dict()
+@app.get("/api/firewall/rules")
+async def get_firewall_rules():
+    """List active tc-flower rules from the DPU."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(f"{FIREWALL_URL}/rules")
+        return resp.json()
 
 
-@app.get("/api/tests/{test_id}/result")
-async def get_test_result(test_id: str):
-    """Get the result of a previously run test."""
-    result = test_runner.get_result(test_id)
-    if result is None:
-        return {"error": f"No result found for test {test_id}"}
-    return result.to_dict()
+@app.post("/api/firewall/rules")
+async def add_firewall_rule(rule: FirewallRuleRequest):
+    """Add a tc-flower rule on the DPU."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.post(
+            f"{FIREWALL_URL}/rules",
+            json=rule.model_dump(exclude_none=True),
+        )
+        return resp.json()
 
 
-# ============================================================
-# Metrics Endpoints
-# ============================================================
+@app.delete("/api/firewall/rules/{rule_id}")
+async def delete_firewall_rule(rule_id: str):
+    """Delete a tc-flower rule from the DPU."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.delete(f"{FIREWALL_URL}/rules/{rule_id}")
+        return resp.json()
 
 
-@app.get("/api/metrics/history")
-async def get_metrics_history():
-    """Return metrics history (up to 1800 data points)."""
-    history = metrics_collector.history
-    return {
-        "count": len(history),
-        "snapshots": [s.to_dict() for s in history[-300:]],  # Cap at 300 for API
-    }
+@app.get("/api/firewall/metrics")
+async def get_firewall_metrics():
+    """Get tc-flower counters from the DPU."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(f"{FIREWALL_URL}/metrics")
+        return resp.json()
 
 
-@app.get("/api/metrics/latest")
-async def get_metrics_latest():
-    """Return latest metrics snapshot."""
-    latest = metrics_collector.latest
-    if latest is None:
-        return {"error": "No metrics collected yet"}
-    return latest.to_dict()
+@app.get("/api/firewall/health")
+async def get_firewall_health():
+    """Check DPU firewall daemon health."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(f"{FIREWALL_URL}/health")
+        return resp.json()
 
 
 # ============================================================
-# Report Endpoints
+# Traffic Generator Proxy (HPE ns-inet at 192.168.9.23:5001)
 # ============================================================
 
 
-@app.get("/api/reports")
-async def list_reports():
-    """List generated reports."""
-    return report_generator.list_reports()
+@app.get("/api/generator/stats")
+async def get_generator_stats():
+    """Get traffic generator statistics."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(f"{GENERATOR_URL}/api/stats")
+        return resp.json()
 
 
-@app.post("/api/reports/generate")
-async def generate_report(req: Optional[ReportRequest] = None):
-    """Trigger report generation from collected test results and metrics."""
-    # Gather all test results
-    all_results = [
-        test_runner.get_result(t.id)
-        for t in TESTS
-        if test_runner.get_result(t.id) is not None
-    ]
-
-    # If no tests have been run, generate a report with empty results
-    metrics_history = metrics_collector.history
-
-    config = ReportConfig()
+@app.post("/api/generator/start")
+async def start_generator(req: GeneratorStartRequest | None = None):
+    """Start the traffic generator."""
+    body = {}
     if req:
-        if req.title:
-            config.title = req.title
-        config.include_charts = req.include_charts
+        if req.profile:
+            body["profile"] = req.profile
+        if req.rate:
+            body["rate"] = req.rate
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.post(f"{GENERATOR_URL}/api/start", json=body)
+        return resp.json()
 
-    gen = ReportGenerator(config)
-    html = gen.generate_html(all_results, metrics_history)
-    html_path = gen.save_report(html)
-    json_path = gen.save_json(all_results)
 
-    return {
-        "html_report": html_path,
-        "json_report": json_path,
-        "test_count": len(all_results),
-        "metrics_points": len(metrics_history),
-    }
+@app.post("/api/generator/stop")
+async def stop_generator():
+    """Stop the traffic generator."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.post(f"{GENERATOR_URL}/api/stop")
+        return resp.json()
 
 
 # ============================================================
-# WebSocket
+# Receiver Proxy (HPE ns-client at 192.168.9.23:5002)
+# ============================================================
+
+
+@app.get("/api/receiver/stats")
+async def get_receiver_stats():
+    """Get receiver statistics."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(f"{RECEIVER_URL}/api/stats")
+        return resp.json()
+
+
+# ============================================================
+# WebSocket — Aggregated Metrics Stream
 # ============================================================
 
 
 @app.websocket("/ws/metrics")
 async def metrics_websocket(websocket: WebSocket):
+    """WebSocket endpoint for real-time aggregated metrics."""
     await websocket.accept()
     connected_clients.add(websocket)
     try:
@@ -258,45 +195,48 @@ async def metrics_websocket(websocket: WebSocket):
         connected_clients.discard(websocket)
 
 
-async def metrics_broadcaster():
-    """Broadcast metrics to all connected WebSocket clients at 1Hz.
+async def _fetch_service(client: httpx.AsyncClient, url: str) -> dict | None:
+    """Fetch JSON from a service, return None on error."""
+    try:
+        resp = await client.get(url, timeout=2.0)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return None
 
-    Only reports real data. Zeros when hardware is unreachable.
-    """
+
+async def metrics_broadcaster():
+    """Poll all 3 services every 1 second and push unified snapshot to WebSocket clients."""
     while True:
         if connected_clients:
-            try:
-                snapshot = await metrics_collector.collect()
-            except Exception:
-                snapshot = None
+            async with httpx.AsyncClient() as client:
+                # Fetch all three in parallel
+                firewall_task = _fetch_service(client, f"{FIREWALL_URL}/metrics")
+                generator_task = _fetch_service(client, f"{GENERATOR_URL}/api/stats")
+                receiver_task = _fetch_service(client, f"{RECEIVER_URL}/api/stats")
 
-            if snapshot:
-                message = json.dumps({
-                    "tx_gbps": snapshot.tx_gbps,
-                    "rx_gbps": snapshot.rx_gbps,
-                    "offload_ratio_pct": snapshot.offload_ratio_pct,
-                    "active_sessions": snapshot.active_sessions,
-                    "vm_cpu_pct": snapshot.vm_cpu_pct,
-                    "dpu_arm_cpu_pct": snapshot.dpu_arm_cpu_pct,
-                    "new_flows_per_sec": snapshot.new_flows_per_sec,
-                    "offloaded_flows": snapshot.offloaded_flows,
-                })
-            else:
-                message = json.dumps({
-                    "tx_gbps": 0.0,
-                    "rx_gbps": 0.0,
-                    "offload_ratio_pct": 0.0,
-                    "active_sessions": 0,
-                    "vm_cpu_pct": 0.0,
-                })
+                firewall_data, generator_data, receiver_data = await asyncio.gather(
+                    firewall_task, generator_task, receiver_task
+                )
+
+            snapshot = {
+                "firewall": firewall_data or {},
+                "generator": generator_data or {},
+                "receiver": receiver_data or {},
+                "timestamp": asyncio.get_event_loop().time(),
+            }
+
+            message = json.dumps(snapshot)
 
             disconnected = set()
-            for client in connected_clients:
+            for ws in connected_clients:
                 try:
-                    await client.send_text(message)
+                    await ws.send_text(message)
                 except Exception:
-                    disconnected.add(client)
+                    disconnected.add(ws)
             connected_clients.difference_update(disconnected)
+
         await asyncio.sleep(1.0)
 
 
@@ -309,7 +249,9 @@ if _ui_dir:
     _ui_path = Path(_ui_dir).expanduser().resolve()
     if _ui_path.is_dir():
         # Serve static assets (JS, CSS, images)
-        app.mount("/assets", StaticFiles(directory=str(_ui_path / "assets")), name="ui-assets")
+        _assets_path = _ui_path / "assets"
+        if _assets_path.is_dir():
+            app.mount("/assets", StaticFiles(directory=str(_assets_path)), name="ui-assets")
 
         @app.get("/{full_path:path}")
         async def serve_spa(full_path: str):

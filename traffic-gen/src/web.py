@@ -1,7 +1,7 @@
 """Flask web UI for the Prism traffic generator.
 
-Exposes a dashboard on port 5001 with start/stop controls, rate slider,
-profile selection, and live packet counters.
+Exposes a dashboard on port 5001 with start/stop controls and live stats.
+Runs inside ns-inet on the HPE server (10.0.1.1 -> 10.0.2.1).
 """
 
 from __future__ import annotations
@@ -28,18 +28,11 @@ def index():
     )
 
 
-@app.route("/api/status")
-def api_status():
-    """Return current generator status as JSON."""
+@app.route("/api/stats")
+def api_stats():
+    """Return current generator statistics as JSON."""
     gen = get_generator()
-    return jsonify(
-        {
-            "running": gen.running,
-            "profile": gen.profile.value,
-            "rate_pps": gen.rate_pps,
-            "stats": gen.stats.snapshot(),
-        }
-    )
+    return jsonify(gen.get_stats())
 
 
 @app.route("/api/start", methods=["POST"])
@@ -65,14 +58,11 @@ def api_stop():
     return jsonify({"status": "stopped"})
 
 
-@app.route("/api/rate", methods=["POST"])
-def api_rate():
-    """Update the packet rate (live, without restart)."""
+@app.route("/api/status")
+def api_status():
+    """Return current generator status (backward compat)."""
     gen = get_generator()
-    data = request.get_json(silent=True) or {}
-    if "rate" in data:
-        gen.rate_pps = int(data["rate"])
-    return jsonify({"rate_pps": gen.rate_pps})
+    return jsonify(gen.get_stats())
 
 
 def main():

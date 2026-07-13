@@ -1,71 +1,93 @@
 import { useState, useEffect, useCallback } from 'react'
-import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip } from 'recharts'
 import { firewallApi, metricsStream } from '../api/client'
 import type { FirewallRule, FirewallMetrics } from '../api/client'
-
-interface ThroughputPoint {
-  time: string
-  pps: number
-}
-
-const MAX_CHART_POINTS = 60
 
 export default function FirewallPanel() {
   const [rules, setRules] = useState<FirewallRule[]>([])
   const [metrics, setMetrics] = useState<FirewallMetrics | null>(null)
-  const [throughputHistory, setThroughputHistory] = useState<ThroughputPoint[]>([])
   const [rulesLoading, setRulesLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   // Load rules on mount
   useEffect(() => {
-    firewallApi.getRules().then(setRules).catch(() => {})
+    loadRules()
   }, [])
 
   // Stream metrics
   useEffect(() => {
     const unsub = metricsStream.subscribe((data) => {
-      setMetrics(data.firewall)
-      setThroughputHistory((prev) => {
-        const next = [
-          ...prev,
-          {
-            time: new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-            pps: data.firewall.throughput_pps,
-          },
-        ]
-        return next.slice(-MAX_CHART_POINTS)
-      })
+      if (data.firewall) {
+        setMetrics(data.firewall)
+      }
     })
     return unsub
   }, [])
 
-  const handleToggleRule = useCallback(async (rule: FirewallRule) => {
-    setRulesLoading(true)
+  const loadRules = useCallback(async () => {
     try {
-      await firewallApi.toggleRule(rule.id, !rule.enabled)
-      setRules((prev) =>
-        prev.map((r) => (r.id === rule.id ? { ...r, enabled: !r.enabled } : r))
-      )
-    } finally {
-      setRulesLoading(false)
+      const r = await firewallApi.getRules()
+      setRules(Array.isArray(r) ? r : [])
+      setError(null)
+    } catch (e) {
+      setError('Failed to load rules')
     }
   }, [])
 
   const handleBlockPort80 = useCallback(async () => {
     setRulesLoading(true)
     try {
-      await firewallApi.blockPort(80)
-      const updated = await firewallApi.getRules()
-      setRules(updated)
+      await firewallApi.addRule({
+        dst_port: 80,
+        protocol: 'tcp',
+        action: 'DENY',
+        priority: 10,
+      })
+      await loadRules()
+      setError(null)
+    } catch (e) {
+      setError('Failed to add rule')
     } finally {
       setRulesLoading(false)
     }
-  }, [])
+  }, [loadRules])
 
-  const offloadPct = metrics?.offload_ratio_pct ?? 0
-  const activeSessions = metrics?.active_sessions ?? 0
-  const hwSessions = metrics?.hw_sessions ?? 0
-  const swSessions = metrics?.sw_sessions ?? 0
+  const handleAllowAll = useCallback(async () => {
+    setRulesLoading(true)
+    try {
+      // Delete all deny rules
+      const denyRules = rules.filter(
+        (r) => r.action.toUpperCase() === 'DENY'
+      )
+      for (const rule of denyRules) {
+        await firewallApi.deleteRule(rule.id)
+      }
+      await loadRules()
+      setError(null)
+    } catch (e) {
+      setError('Failed to remove rules')
+    } finally {
+      setRulesLoading(false)
+    }
+  }, [rules, loadRules])
+
+  const handleDeleteRule = useCallback(
+    async (ruleId: string) => {
+      setRulesLoading(true)
+      try {
+        await firewallApi.deleteRule(ruleId)
+        await loadRules()
+      } catch (e) {
+        setError('Failed to delete rule')
+      } finally {
+        setRulesLoading(false)
+      }
+    },
+    [loadRules]
+  )
+
+  const pktsForwarded = metrics?.packets_forwarded ?? 0
+  const pktsDropped = metrics?.packets_dropped ?? 0
+  const activeRules = metrics?.active_rules ?? rules.length
 
   return (
     <div className="flex flex-col h-full">
@@ -74,64 +96,66 @@ export default function FirewallPanel() {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
             d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
         </svg>
-        Firewall Status
+        DPU Firewall (tc-flower)
       </h2>
 
-      {/* Offload gauge */}
+      {/* Metrics summary */}
       <div className="bg-gray-800/60 rounded-lg p-4 mb-4">
-        <div className="flex justify-between items-center mb-2">
-          <span className="text-xs text-gray-400 uppercase tracking-wider">HW Offload Ratio</span>
-          <span className="text-xl font-mono font-bold text-amber-300">{offloadPct.toFixed(1)}%</span>
-        </div>
-        <div className="w-full h-3 bg-gray-700 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-gradient-to-r from-amber-600 to-amber-400 rounded-full transition-all duration-500"
-            style={{ width: `${Math.min(offloadPct, 100)}%` }}
-          />
-        </div>
-        <div className="flex justify-between text-xs text-gray-500 mt-2">
-          <span>Sessions: {activeSessions.toLocaleString()}</span>
-          <span>HW: {hwSessions} / SW: {swSessions}</span>
+        <div className="grid grid-cols-3 gap-3">
+          <div>
+            <div className="text-xs text-gray-400 uppercase tracking-wider">Forwarded</div>
+            <div className="text-lg font-mono font-bold text-green-400">
+              {pktsForwarded.toLocaleString()}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs text-gray-400 uppercase tracking-wider">Dropped</div>
+            <div className="text-lg font-mono font-bold text-red-400">
+              {pktsDropped.toLocaleString()}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs text-gray-400 uppercase tracking-wider">Active Rules</div>
+            <div className="text-lg font-mono font-bold text-amber-300">
+              {activeRules}
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Throughput chart */}
-      <div className="bg-gray-800/60 rounded-lg p-3 mb-4">
-        <div className="text-xs text-gray-400 uppercase tracking-wider mb-2">Throughput (pps)</div>
-        <div className="h-28">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={throughputHistory}>
-              <XAxis dataKey="time" hide />
-              <YAxis hide domain={['dataMin', 'dataMax']} />
-              <Tooltip
-                contentStyle={{ background: '#1f2937', border: '1px solid #374151', borderRadius: '6px' }}
-                labelStyle={{ color: '#9ca3af' }}
-                itemStyle={{ color: '#fbbf24' }}
-              />
-              <Line
-                type="monotone"
-                dataKey="pps"
-                stroke="#f59e0b"
-                strokeWidth={2}
-                dot={false}
-                isAnimationActive={false}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
+      {/* Action buttons */}
+      <div className="flex gap-2 mb-4">
+        <button
+          onClick={handleBlockPort80}
+          disabled={rulesLoading}
+          className="flex-1 text-sm bg-red-700 hover:bg-red-600 text-white px-3 py-2 rounded transition-colors disabled:opacity-50"
+        >
+          Block Port 80
+        </button>
+        <button
+          onClick={handleAllowAll}
+          disabled={rulesLoading}
+          className="flex-1 text-sm bg-green-700 hover:bg-green-600 text-white px-3 py-2 rounded transition-colors disabled:opacity-50"
+        >
+          Allow All
+        </button>
+        <button
+          onClick={loadRules}
+          disabled={rulesLoading}
+          className="text-sm bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded transition-colors disabled:opacity-50"
+        >
+          Refresh
+        </button>
       </div>
+
+      {error && (
+        <div className="text-xs text-red-400 mb-2">{error}</div>
+      )}
 
       {/* Rules list */}
       <div className="flex-1 overflow-auto">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-xs text-gray-400 uppercase tracking-wider">Firewall Rules</span>
-          <button
-            onClick={handleBlockPort80}
-            disabled={rulesLoading}
-            className="text-xs bg-red-700 hover:bg-red-600 text-white px-2 py-1 rounded transition-colors disabled:opacity-50"
-          >
-            Block Port 80
-          </button>
+        <div className="text-xs text-gray-400 uppercase tracking-wider mb-2">
+          Active Rules ({rules.length})
         </div>
         <div className="space-y-1">
           {rules.map((rule) => (
@@ -140,27 +164,41 @@ export default function FirewallPanel() {
               className="flex items-center justify-between bg-gray-800/40 rounded px-3 py-2"
             >
               <div className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${rule.enabled ? (rule.action === 'deny' ? 'bg-red-400' : 'bg-green-400') : 'bg-gray-600'}`} />
-                <span className="text-sm text-gray-200">{rule.name}</span>
-                <span className="text-xs text-gray-500">
-                  {rule.protocol}{rule.dst_port ? `:${rule.dst_port}` : ''}
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    rule.action.toUpperCase() === 'DENY' ? 'bg-red-400' : 'bg-green-400'
+                  }`}
+                />
+                <span className="text-sm text-gray-200">
+                  {rule.action.toUpperCase()} {rule.protocol}
+                  {rule.dst_port ? `:${rule.dst_port}` : ''}
                 </span>
+                {rule.in_hw && (
+                  <span className="text-xs bg-blue-900/60 text-blue-300 px-1.5 py-0.5 rounded">
+                    in_hw
+                  </span>
+                )}
               </div>
-              <button
-                onClick={() => handleToggleRule(rule)}
-                disabled={rulesLoading}
-                className={`text-xs px-2 py-0.5 rounded transition-colors ${
-                  rule.enabled
-                    ? 'bg-green-900/60 text-green-300 hover:bg-green-800/60'
-                    : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
-                }`}
-              >
-                {rule.enabled ? 'ON' : 'OFF'}
-              </button>
+              <div className="flex items-center gap-2">
+                {rule.packets != null && (
+                  <span className="text-xs text-gray-500 font-mono">
+                    {rule.packets} pkts
+                  </span>
+                )}
+                <button
+                  onClick={() => handleDeleteRule(rule.id)}
+                  disabled={rulesLoading}
+                  className="text-xs text-red-400 hover:text-red-300 px-1.5 py-0.5 rounded hover:bg-red-900/30 transition-colors disabled:opacity-50"
+                >
+                  X
+                </button>
+              </div>
             </div>
           ))}
           {rules.length === 0 && (
-            <div className="text-sm text-gray-500 text-center py-4">No rules loaded</div>
+            <div className="text-sm text-gray-500 text-center py-4">
+              No rules — default policy: deny-all
+            </div>
           )}
         </div>
       </div>

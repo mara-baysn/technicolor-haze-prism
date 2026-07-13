@@ -1,18 +1,18 @@
-"""Packet crafting and sending engine for the Prism traffic generator.
+"""TCP connection-based traffic generator for the Prism firewall demo.
 
-Sends TCP SYN, UDP, and ICMP-like traffic to the client VF interface at
-10.0.2.1 via standard sockets (no root required — the DPU handles L2 steering).
+Sends TCP connections to the client VF interface (10.0.2.1) on multiple ports.
+Designed to run inside ns-inet namespace on the HPE server.
+
+Uses simple socket.connect() — no scapy needed, TCP works through tc-flower.
 """
 
 from __future__ import annotations
 
 import socket
-import struct
 import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable
 
 
 class Profile(str, Enum):
@@ -21,149 +21,146 @@ class Profile(str, Enum):
     HTTP = "http"
     HTTPS = "https"
     MIXED = "mixed"
-    STORM = "storm"
+    ALL_PORTS = "all_ports"
 
 
 @dataclass
-class FlowSpec:
-    """Specification of a single traffic flow."""
+class TargetPort:
+    """A target port to send traffic to."""
 
-    dst_ip: str
-    dst_port: int
-    protocol: str  # "tcp" or "udp"
-    payload_size: int = 64
+    port: int
+    protocol: str = "tcp"
+
+
+@dataclass
+class PortStats:
+    """Per-port connection statistics."""
+
+    port: int
+    attempted: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    bytes_sent: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def record_success(self, nbytes: int) -> None:
+        with self._lock:
+            self.attempted += 1
+            self.succeeded += 1
+            self.bytes_sent += nbytes
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self.attempted += 1
+            self.failed += 1
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "port": self.port,
+                "attempted": self.attempted,
+                "succeeded": self.succeeded,
+                "failed": self.failed,
+                "bytes_sent": self.bytes_sent,
+            }
 
 
 @dataclass
 class Stats:
-    """Live counters for the traffic generator."""
+    """Aggregate stats across all ports."""
 
-    packets_sent: int = 0
-    bytes_sent: int = 0
-    active_flows: int = 0
-    errors: int = 0
+    total_attempted: int = 0
+    total_succeeded: int = 0
+    total_failed: int = 0
+    total_bytes_sent: int = 0
     start_time: float = 0.0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def record_packet(self, nbytes: int) -> None:
+    def record_success(self, nbytes: int) -> None:
         with self._lock:
-            self.packets_sent += 1
-            self.bytes_sent += nbytes
+            self.total_attempted += 1
+            self.total_succeeded += 1
+            self.total_bytes_sent += nbytes
 
-    def record_error(self) -> None:
+    def record_failure(self) -> None:
         with self._lock:
-            self.errors += 1
+            self.total_attempted += 1
+            self.total_failed += 1
 
     def reset(self) -> None:
         with self._lock:
-            self.packets_sent = 0
-            self.bytes_sent = 0
-            self.active_flows = 0
-            self.errors = 0
+            self.total_attempted = 0
+            self.total_succeeded = 0
+            self.total_failed = 0
+            self.total_bytes_sent = 0
             self.start_time = time.time()
 
     def snapshot(self) -> dict:
         with self._lock:
             elapsed = time.time() - self.start_time if self.start_time else 0
-            pps = self.packets_sent / elapsed if elapsed > 0 else 0
+            rate = self.total_attempted / elapsed if elapsed > 0 else 0
             return {
-                "packets_sent": self.packets_sent,
-                "bytes_sent": self.bytes_sent,
-                "active_flows": self.active_flows,
-                "errors": self.errors,
+                "total_attempted": self.total_attempted,
+                "total_succeeded": self.total_succeeded,
+                "total_failed": self.total_failed,
+                "total_bytes_sent": self.total_bytes_sent,
                 "elapsed_s": round(elapsed, 1),
-                "current_pps": round(pps, 1),
+                "connections_per_sec": round(rate, 1),
             }
 
 
-# ---------------------------------------------------------------------------
-# Profile definitions
-# ---------------------------------------------------------------------------
-
-PROFILE_FLOWS: dict[Profile, list[FlowSpec]] = {
+# Profile definitions: which ports to target
+PROFILE_PORTS: dict[Profile, list[TargetPort]] = {
     Profile.HTTP: [
-        FlowSpec(dst_ip="10.0.2.1", dst_port=80, protocol="tcp", payload_size=128),
+        TargetPort(port=80),
     ],
     Profile.HTTPS: [
-        FlowSpec(dst_ip="10.0.2.1", dst_port=443, protocol="tcp", payload_size=256),
+        TargetPort(port=443),
     ],
     Profile.MIXED: [
-        FlowSpec(dst_ip="10.0.2.1", dst_port=80, protocol="tcp", payload_size=128),
-        FlowSpec(dst_ip="10.0.2.1", dst_port=443, protocol="tcp", payload_size=256),
-        FlowSpec(dst_ip="10.0.2.1", dst_port=53, protocol="udp", payload_size=64),
-        FlowSpec(dst_ip="10.0.2.1", dst_port=5432, protocol="udp", payload_size=96),
+        TargetPort(port=80),
+        TargetPort(port=443),
+        TargetPort(port=22),
+        TargetPort(port=5432),
     ],
-    Profile.STORM: [
-        FlowSpec(dst_ip="10.0.2.1", dst_port=p, protocol="tcp", payload_size=64)
-        for p in range(1024, 1124)  # 100 ports
+    Profile.ALL_PORTS: [
+        TargetPort(port=80),
+        TargetPort(port=443),
+        TargetPort(port=22),
+        TargetPort(port=5432),
     ],
 }
 
-
-def build_payload(flow: FlowSpec, seq: int) -> bytes:
-    """Build a simple payload with a sequence number header.
-
-    Format: 4-byte big-endian sequence number + padding to payload_size.
-    """
-    header = struct.pack("!I", seq % (2**32))
-    padding_len = max(0, flow.payload_size - len(header))
-    return header + b"\x00" * padding_len
-
-
-def create_socket(flow: FlowSpec, src_ip: str = "10.0.1.1") -> socket.socket:
-    """Create a standard socket bound to the source interface IP.
-
-    Uses SOCK_STREAM for TCP or SOCK_DGRAM for UDP.
-    No root required — the DPU hairpins traffic at L2.
-    """
-    if flow.protocol == "tcp":
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(0.5)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    else:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(0.5)
-
-    # Bind to source IP (ens8f0v0) — will fail gracefully if IP not assigned
-    try:
-        sock.bind((src_ip, 0))
-    except OSError:
-        pass  # Non-fatal: kernel picks source
-
-    return sock
+# Payload sent on each successful connection
+PAYLOAD = b"PRISM-PROBE " + b"X" * 52  # 64 bytes total
 
 
 class TrafficGenerator:
-    """Main traffic generation engine.
+    """TCP connection-based traffic generator.
 
-    Manages worker threads that send packets at the configured rate.
+    Repeatedly attempts TCP connections to target ports on 10.0.2.1.
+    When the DPU firewall blocks a port, connections to that port fail,
+    providing visible proof that the firewall is working.
     """
 
     def __init__(
         self,
+        dst_ip: str = "10.0.2.1",
         src_ip: str = "10.0.1.1",
-        interface: str = "ens8f0v0",
     ) -> None:
+        self.dst_ip = dst_ip
         self.src_ip = src_ip
-        self.interface = interface
         self.stats = Stats()
+        self.port_stats: dict[int, PortStats] = {}
         self._running = False
-        self._rate_pps: int = 1000
         self._profile: Profile = Profile.MIXED
+        self._rate_cps: int = 10  # connections per second total
         self._workers: list[threading.Thread] = []
         self._stop_event = threading.Event()
 
     @property
     def running(self) -> bool:
         return self._running
-
-    @property
-    def rate_pps(self) -> int:
-        return self._rate_pps
-
-    @rate_pps.setter
-    def rate_pps(self, value: int) -> None:
-        self._rate_pps = max(100, min(50000, value))
 
     @property
     def profile(self) -> Profile:
@@ -175,6 +172,14 @@ class TrafficGenerator:
             value = Profile(value.lower())
         self._profile = value
 
+    @property
+    def rate_pps(self) -> int:
+        return self._rate_cps
+
+    @rate_pps.setter
+    def rate_pps(self, value: int) -> None:
+        self._rate_cps = max(1, min(100, value))
+
     def start(self) -> None:
         """Start traffic generation."""
         if self._running:
@@ -183,16 +188,18 @@ class TrafficGenerator:
         self._stop_event.clear()
         self._running = True
         self.stats.reset()
+        self.port_stats.clear()
 
-        flows = PROFILE_FLOWS[self._profile]
-        self.stats.active_flows = len(flows)
+        ports = PROFILE_PORTS[self._profile]
+        for tp in ports:
+            self.port_stats[tp.port] = PortStats(port=tp.port)
 
-        for i, flow in enumerate(flows):
+        for tp in ports:
             t = threading.Thread(
                 target=self._worker,
-                args=(flow, i),
+                args=(tp,),
                 daemon=True,
-                name=f"gen-worker-{i}",
+                name=f"gen-{tp.port}",
             )
             self._workers.append(t)
             t.start()
@@ -207,68 +214,60 @@ class TrafficGenerator:
 
         for t in self._workers:
             t.join(timeout=2.0)
-
         self._workers.clear()
-        self.stats.active_flows = 0
 
-    def _worker(self, flow: FlowSpec, worker_id: int) -> None:
-        """Worker thread that sends packets for a single flow."""
-        flows = PROFILE_FLOWS[self._profile]
-        num_flows = len(flows)
-        seq = 0
+    def get_stats(self) -> dict:
+        """Return full statistics snapshot."""
+        return {
+            "running": self._running,
+            "profile": self._profile.value,
+            "rate_cps": self._rate_cps,
+            "aggregate": self.stats.snapshot(),
+            "per_port": [ps.snapshot() for ps in self.port_stats.values()],
+        }
+
+    def _worker(self, target: TargetPort) -> None:
+        """Worker thread: repeatedly connect to a single port."""
+        num_ports = len(PROFILE_PORTS[self._profile])
+        ps = self.port_stats[target.port]
 
         while not self._stop_event.is_set():
-            # Calculate per-flow rate
-            per_flow_rate = self._rate_pps / max(num_flows, 1)
-            interval = 1.0 / per_flow_rate if per_flow_rate > 0 else 1.0
-
-            payload = build_payload(flow, seq)
+            # Per-port rate = total rate / number of ports
+            per_port_rate = self._rate_cps / max(num_ports, 1)
+            interval = 1.0 / per_port_rate if per_port_rate > 0 else 1.0
 
             try:
-                if flow.protocol == "tcp":
-                    self._send_tcp(flow, payload)
-                else:
-                    self._send_udp(flow, payload)
-                self.stats.record_packet(len(payload))
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2.0)
+                try:
+                    sock.bind((self.src_ip, 0))
+                except OSError:
+                    pass  # Non-fatal: kernel picks source
+
+                sock.connect((self.dst_ip, target.port))
+                sock.sendall(PAYLOAD)
+                nbytes = len(PAYLOAD)
+                sock.close()
+
+                ps.record_success(nbytes)
+                self.stats.record_success(nbytes)
             except (OSError, ConnectionError):
-                self.stats.record_error()
+                ps.record_failure()
+                self.stats.record_failure()
+                try:
+                    sock.close()
+                except Exception:
+                    pass
 
-            seq += 1
-
-            # Rate limiting — sleep for the inter-packet interval
-            # Use a short sleep with stop check for responsiveness
+            # Rate limiting with stop check
             sleep_end = time.monotonic() + interval
             while time.monotonic() < sleep_end:
                 if self._stop_event.is_set():
                     return
-                time.sleep(min(0.01, interval))
-
-    def _send_tcp(self, flow: FlowSpec, payload: bytes) -> None:
-        """Send a TCP connection attempt + payload (SYN-like behavior)."""
-        sock = None
-        try:
-            sock = create_socket(flow, self.src_ip)
-            sock.connect((flow.dst_ip, flow.dst_port))
-            sock.sendall(payload)
-        finally:
-            if sock:
-                sock.close()
-
-    def _send_udp(self, flow: FlowSpec, payload: bytes) -> None:
-        """Send a UDP datagram."""
-        sock = None
-        try:
-            sock = create_socket(flow, self.src_ip)
-            sock.sendto(payload, (flow.dst_ip, flow.dst_port))
-        finally:
-            if sock:
-                sock.close()
+                time.sleep(min(0.05, interval))
 
 
-# ---------------------------------------------------------------------------
-# Convenience factory
-# ---------------------------------------------------------------------------
-
+# Singleton
 _instance: TrafficGenerator | None = None
 
 

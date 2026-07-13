@@ -7,8 +7,8 @@ export default function TopologyDiagram() {
 
   useEffect(() => {
     const unsub = metricsStream.subscribe((data) => {
-      setActive(data.traffic.generating)
-      setOffloadPct(data.firewall.offload_ratio_pct)
+      setActive(data.generator?.running ?? false)
+      setOffloadPct(Number(data.firewall?.active_rules ?? 0))
     })
     return unsub
   }, [])
