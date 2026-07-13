@@ -235,8 +235,14 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
     DOCA_LOG_INFO("CT OFFLOADED: %s:%u -> %s:%u proto=%u (VF0<->VF3)",
                   src_str, src_port, dst_str, dst_port, protocol);
 
-    /* Forward this first packet manually since CT was just created */
-    rte_eth_tx_burst(0, 0, &pkt, 1);
+    /* Forward this first packet via switch port (port 0).
+     * The packet's dst MAC is already VF3's MAC (from static ARP on sender),
+     * so the eSwitch FDB will deliver it to VF3. */
+    uint16_t nb_tx = rte_eth_tx_burst(0, 0, &pkt, 1);
+    if (nb_tx == 0) {
+        DOCA_LOG_WARN("Failed to TX first packet to switch port");
+        rte_pktmbuf_free(pkt);
+    }
 }
 
 void ct_offload_main_loop(struct ct_offload_ctx *ctx)

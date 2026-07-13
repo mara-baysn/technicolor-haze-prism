@@ -330,7 +330,9 @@ doca_error_t fw_flow_init(struct fw_flow_ctx *ctx, struct flow_switch_ctx *switc
     ctx->nb_queues = NB_QUEUES;
 
     /* Determine number of ports based on discovered devices */
-    ctx->nb_ports = switch_ctx->devs_ctx.devs_manager[0].nb_reps > 0 ? 2 : 1;
+    /* Start all ports: 1 (switch/PF) + N representors */
+    int nb_reps = switch_ctx->devs_ctx.devs_manager[0].nb_reps;
+    ctx->nb_ports = 1 + (nb_reps > 0 ? nb_reps : 0);
     DOCA_LOG_INFO("Configuring %d flow ports", ctx->nb_ports);
 
     /* Configure resources in port mode */
@@ -396,8 +398,10 @@ doca_error_t fw_flow_init(struct fw_flow_ctx *ctx, struct flow_switch_ctx *switc
     if (result != DOCA_SUCCESS)
         goto cleanup;
 
-    /* Create post-CT forwarding pipe (CT HIT target) */
-    int fwd_port_id = ctx->nb_ports > 1 ? 1 : 0;
+    /* Create post-CT forwarding pipe (CT HIT target)
+     * Forward to port 4 (VF3 representor = client) for origin direction.
+     * Port indices: 0=switch, 1=pf0vf0(inet), 2=pf0vf1, 3=pf0vf2, 4=pf0vf3(client) */
+    int fwd_port_id = ctx->nb_ports > 4 ? 4 : 1;
     result = create_post_ct_pipe(ctx->ports[0], fwd_port_id, &ctrl_status, &ctx->post_ct_fwd_pipe);
     if (result != DOCA_SUCCESS)
         goto cleanup;
