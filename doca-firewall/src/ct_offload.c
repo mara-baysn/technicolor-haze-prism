@@ -196,7 +196,19 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
         return;
     }
 
-    /* Step 2: Add the CT entry with forwarding */
+    /* Step 2: Add the CT entry with explicit per-direction forwarding */
+    struct doca_flow_fwd fwd_o, fwd_r;
+    memset(&fwd_o, 0, sizeof(fwd_o));
+    memset(&fwd_r, 0, sizeof(fwd_r));
+
+    /* Origin (VF0→VF3): forward to port 4 (VF3 rep) */
+    fwd_o.type = DOCA_FLOW_FWD_PORT;
+    fwd_o.port_id = 4;
+
+    /* Reply (VF3→VF0): forward to port 1 (VF0 rep) */
+    fwd_r.type = DOCA_FLOW_FWD_PORT;
+    fwd_r.port_id = 1;
+
     result = doca_flow_ct_add_entry(CT_QUEUE,
                                     ctx->flow_ctx->ct_pipe,
                                     entry_flags,
@@ -204,8 +216,8 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
                                     &match_r,
                                     NULL,  /* actions_origin */
                                     NULL,  /* actions_reply */
-                                    NULL,  /* fwd_origin (use pipe default) */
-                                    NULL,  /* fwd_reply (use pipe default) */
+                                    &fwd_o,
+                                    &fwd_r,
                                     CT_AGING_TIMEOUT_S,
                                     NULL,  /* usr_ctx */
                                     entry);

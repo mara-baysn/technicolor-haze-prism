@@ -262,9 +262,12 @@ static doca_error_t create_root_pipe(struct doca_flow_port *port,
     }
     doca_flow_pipe_cfg_destroy(cfg);
 
-    /* Entry: Match IPv4 TCP -> CT pipe (priority 1) */
-    struct doca_flow_pipe_entry *entry = NULL;
+    /* Entries: Match IPv4 TCP/UDP -> CT pipe
+     * Use outer.l3_type + l4_type_ext with masks (proven working) */
+    fwd.type = DOCA_FLOW_FWD_PIPE;
+    fwd.next_pipe = ct_pipe;
 
+    /* TCP entry (priority 1) */
     memset(&match, 0, sizeof(match));
     memset(&mask, 0, sizeof(mask));
     match.outer.l3_type = DOCA_FLOW_L3_TYPE_IP4;
@@ -272,18 +275,15 @@ static doca_error_t create_root_pipe(struct doca_flow_port *port,
     match.outer.l4_type_ext = DOCA_FLOW_L4_TYPE_EXT_TCP;
     mask.outer.l4_type_ext = DOCA_FLOW_L4_TYPE_EXT_TCP;
 
-    fwd.type = DOCA_FLOW_FWD_PIPE;
-    fwd.next_pipe = ct_pipe;
-
     result = doca_flow_pipe_control_add_entry(0, *pipe, &match, &mask,
                                               NULL, NULL, NULL, NULL,
-                                              NULL, 1, &fwd, NULL, &entry);
+                                              NULL, 1, &fwd, NULL, NULL);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to add root TCP entry: %s", doca_error_get_descr(result));
         return result;
     }
 
-    /* Entry: Match IPv4 UDP -> CT pipe (priority 2) */
+    /* UDP entry (priority 2) */
     memset(&match, 0, sizeof(match));
     memset(&mask, 0, sizeof(mask));
     match.outer.l3_type = DOCA_FLOW_L3_TYPE_IP4;
@@ -293,7 +293,7 @@ static doca_error_t create_root_pipe(struct doca_flow_port *port,
 
     result = doca_flow_pipe_control_add_entry(0, *pipe, &match, &mask,
                                               NULL, NULL, NULL, NULL,
-                                              NULL, 2, &fwd, NULL, &entry);
+                                              NULL, 2, &fwd, NULL, NULL);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to add root UDP entry: %s", doca_error_get_descr(result));
         return result;
@@ -399,9 +399,9 @@ doca_error_t fw_flow_init(struct fw_flow_ctx *ctx, struct flow_switch_ctx *switc
         goto cleanup;
 
     /* Create post-CT forwarding pipe (CT HIT target)
-     * Forward to port 4 (VF3 representor = client) for origin direction.
-     * Port indices: 0=switch, 1=pf0vf0(inet), 2=pf0vf1, 3=pf0vf2, 4=pf0vf3(client) */
-    int fwd_port_id = ctx->nb_ports > 4 ? 4 : 1;
+     * Forward to port 1 (first VF rep) for testing.
+     * DEBUG: testing if any port forwarding works at all */
+    int fwd_port_id = 1;
     result = create_post_ct_pipe(ctx->ports[0], fwd_port_id, &ctrl_status, &ctx->post_ct_fwd_pipe);
     if (result != DOCA_SUCCESS)
         goto cleanup;
