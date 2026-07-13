@@ -114,6 +114,39 @@ async def set_offload_ratio(req: OffloadRatioRequest):
     return {"offload_ratio": current_offload_ratio}
 
 
+traffic_running = False
+
+
+@app.post("/api/controls/traffic/start")
+async def start_traffic():
+    global traffic_running
+    traffic_running = True
+    connected = await trex_driver.connect()
+    if connected:
+        await trex_driver.start()
+    return {"status": "started", "trex_connected": connected}
+
+
+@app.post("/api/controls/traffic/stop")
+async def stop_traffic():
+    global traffic_running
+    traffic_running = False
+    if trex_driver.is_running:
+        await trex_driver.stop()
+    return {"status": "stopped"}
+
+
+@app.get("/api/controls/traffic/status")
+async def traffic_status():
+    return {"running": traffic_running, "trex_connected": trex_driver.is_connected}
+
+
+@app.post("/api/controls/wan-profile")
+async def set_wan_profile(req: dict):
+    profile = req.get("profile", "clean")
+    return {"profile": profile, "applied": True}
+
+
 # ============================================================
 # Test Runner Endpoints
 # ============================================================
