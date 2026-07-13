@@ -18,6 +18,8 @@
 #include <doca_flow.h>
 #include <doca_flow_ct.h>
 
+#include <flow_common.h>
+
 #include "ct_offload.h"
 #include "flow_init.h"
 #include "policy.h"
@@ -163,26 +165,38 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
     /* ALLOW: offload to CT */
     atomic_fetch_add(&ctx->metrics->pkts_allowed, 1);
 
+    uint32_t prepare_flags = DOCA_FLOW_CT_ENTRY_FLAGS_ALLOC_ON_MISS;
     uint32_t entry_flags = DOCA_FLOW_CT_ENTRY_FLAGS_NO_WAIT |
                            DOCA_FLOW_CT_ENTRY_FLAGS_DIR_ORIGIN |
                            DOCA_FLOW_CT_ENTRY_FLAGS_DIR_REPLY;
 
-    /* Set per-direction forwarding:
-     * Origin (VF0->VF3): forward to VF3 (port 4)
-     * Reply (VF3->VF0): forward to VF0 (port 1)
-     */
-    struct doca_flow_fwd fwd_origin, fwd_reply;
-    memset(&fwd_origin, 0, sizeof(fwd_origin));
-    memset(&fwd_reply, 0, sizeof(fwd_reply));
-
-    /* Forward origin to representor (port 1), reply back to switch (port 0) */
-    fwd_origin.type = DOCA_FLOW_FWD_PORT;
-    fwd_origin.port_id = ctx->flow_ctx->nb_ports > 1 ? 1 : 0;
-
-    fwd_reply.type = DOCA_FLOW_FWD_PORT;
-    fwd_reply.port_id = 0;
-
+    /* Step 1: Prepare (allocate) the CT entry */
     struct doca_flow_pipe_entry *entry = NULL;
+    bool conn_found = false;
+
+    result = doca_flow_ct_entry_prepare(CT_QUEUE,
+                                        ctx->flow_ctx->ct_pipe,
+                                        prepare_flags,
+                                        &match_o,
+                                        0,  /* hash_origin (auto) */
+                                        &match_r,
+                                        0,  /* hash_reply (auto) */
+                                        &entry,
+                                        &conn_found);
+    if (result != DOCA_SUCCESS) {
+        atomic_fetch_add(&ctx->metrics->ct_add_errors, 1);
+        DOCA_LOG_WARN("Failed to prepare CT entry: %s", doca_error_get_descr(result));
+        rte_pktmbuf_free(pkt);
+        return;
+    }
+
+    if (conn_found) {
+        /* Connection already exists in CT table */
+        rte_pktmbuf_free(pkt);
+        return;
+    }
+
+    /* Step 2: Add the CT entry with forwarding */
     result = doca_flow_ct_add_entry(CT_QUEUE,
                                     ctx->flow_ctx->ct_pipe,
                                     entry_flags,
@@ -190,8 +204,8 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
                                     &match_r,
                                     NULL,  /* actions_origin */
                                     NULL,  /* actions_reply */
-                                    &fwd_origin,
-                                    &fwd_reply,
+                                    NULL,  /* fwd_origin (use pipe default) */
+                                    NULL,  /* fwd_reply (use pipe default) */
                                     CT_AGING_TIMEOUT_S,
                                     NULL,  /* usr_ctx */
                                     entry);
@@ -200,6 +214,17 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
         DOCA_LOG_WARN("Failed to add CT entry: %s", doca_error_get_descr(result));
         rte_pktmbuf_free(pkt);
         return;
+    }
+
+    /* Step 3: Process the pending entry (NO_WAIT requires explicit process) */
+    uint32_t queue_room = 0;
+    result = doca_flow_ct_entries_process(ctx->flow_ctx->ports[0],
+                                          CT_QUEUE,
+                                          0,   /* min_room */
+                                          0,   /* max_processed: 0 = all */
+                                          &queue_room);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_WARN("Failed to process CT entries: %s", doca_error_get_descr(result));
     }
 
     atomic_fetch_add(&ctx->metrics->sessions_offloaded, 1);
