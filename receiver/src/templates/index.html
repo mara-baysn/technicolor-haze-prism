@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prism Traffic Receiver</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0f1419;
+            color: #e7e9ea;
+            padding: 2rem;
+        }
+        h1 { color: #7856ff; margin-bottom: 0.5rem; }
+        .subtitle { color: #71767b; margin-bottom: 2rem; }
+
+        .summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        .card {
+            background: #1e2732;
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid #2f3336;
+        }
+        .card .label { color: #71767b; font-size: 0.85rem; text-transform: uppercase; }
+        .card .value { font-size: 2rem; font-weight: 700; margin-top: 0.5rem; }
+
+        .port-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        .port-card {
+            background: #1e2732;
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 2px solid #2f3336;
+            transition: border-color 0.3s;
+        }
+        .port-card.active { border-color: #00ba7c; }
+        .port-card.blocked { border-color: #f4212e; opacity: 0.6; }
+
+        .port-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        .port-name {
+            font-size: 1.2rem;
+            font-weight: 700;
+        }
+        .port-badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .port-badge.tcp { background: #1d3a5c; color: #1d9bf0; }
+        .port-badge.udp { background: #3a2e5c; color: #7856ff; }
+
+        .port-stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.5rem; }
+        .port-stat .label { font-size: 0.7rem; color: #71767b; text-transform: uppercase; }
+        .port-stat .value { font-size: 1.1rem; font-weight: 600; }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+            padding-top: 0.75rem;
+            border-top: 1px solid #2f3336;
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+        .status-dot.receiving { background: #00ba7c; animation: pulse 1.5s infinite; }
+        .status-dot.idle { background: #71767b; }
+        .status-dot.blocked { background: #f4212e; }
+        .status-label { font-size: 0.8rem; color: #71767b; }
+
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+        .controls {
+            background: #1e2732;
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid #2f3336;
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+        button {
+            padding: 0.75rem 2rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        button:hover { opacity: 0.85; }
+        .btn-start { background: #00ba7c; color: #fff; }
+        .btn-stop { background: #f4212e; color: #fff; }
+        .status-text { color: #71767b; margin-left: auto; }
+    </style>
+</head>
+<body>
+    <h1>Prism Traffic Receiver</h1>
+    <p class="subtitle">Listening on 10.0.2.1 (ens8f0v3) &mdash; blocked ports will show zero activity</p>
+
+    <div class="summary">
+        <div class="card">
+            <div class="label">Total Packets</div>
+            <div class="value" id="totalPackets">0</div>
+        </div>
+        <div class="card">
+            <div class="label">Total Bytes</div>
+            <div class="value" id="totalBytes">0</div>
+        </div>
+        <div class="card">
+            <div class="label">Total Connections</div>
+            <div class="value" id="totalConns">0</div>
+        </div>
+        <div class="card">
+            <div class="label">Elapsed</div>
+            <div class="value" id="elapsed">0s</div>
+        </div>
+    </div>
+
+    <div class="port-grid" id="portGrid"></div>
+
+    <div class="controls">
+        <button class="btn-start" id="btnStart">Start Listeners</button>
+        <button class="btn-stop" id="btnStop">Stop Listeners</button>
+        <span class="status-text" id="statusText">Initializing...</span>
+    </div>
+
+    <script>
+        function formatBytes(b) {
+            if (b < 1024) return b + ' B';
+            if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+            if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+            return (b / 1073741824).toFixed(2) + ' GB';
+        }
+
+        function portLabel(port) {
+            const names = { 80: 'HTTP', 443: 'HTTPS', 5432: 'PostgreSQL', 22: 'SSH', 53: 'DNS' };
+            return names[port] || ('Port ' + port);
+        }
+
+        function renderPortCard(ps) {
+            const isActive = ps.active;
+            const isBlocked = ps.last_seen_ago_s !== null && ps.last_seen_ago_s > 10 && ps.packets > 0;
+            const stateClass = isActive ? 'active' : (isBlocked ? 'blocked' : '');
+            const dotClass = isActive ? 'receiving' : (isBlocked ? 'blocked' : 'idle');
+            const stateLabel = isActive ? 'Receiving' : (isBlocked ? 'Blocked by firewall' : 'Idle');
+
+            return `
+                <div class="port-card ${stateClass}">
+                    <div class="port-header">
+                        <span class="port-name">${portLabel(ps.port)} :${ps.port}</span>
+                        <span class="port-badge ${ps.protocol}">${ps.protocol.toUpperCase()}</span>
+                    </div>
+                    <div class="port-stats">
+                        <div class="port-stat">
+                            <div class="label">Connections</div>
+                            <div class="value">${ps.connections.toLocaleString()}</div>
+                        </div>
+                        <div class="port-stat">
+                            <div class="label">Packets</div>
+                            <div class="value">${ps.packets.toLocaleString()}</div>
+                        </div>
+                        <div class="port-stat">
+                            <div class="label">Bytes</div>
+                            <div class="value">${formatBytes(ps.bytes_received)}</div>
+                        </div>
+                    </div>
+                    <div class="status-indicator">
+                        <span class="status-dot ${dotClass}"></span>
+                        <span class="status-label">${stateLabel}</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        function updateUI(data) {
+            document.getElementById('totalPackets').textContent = data.total_packets.toLocaleString();
+            document.getElementById('totalBytes').textContent = formatBytes(data.total_bytes);
+            document.getElementById('totalConns').textContent = data.total_connections.toLocaleString();
+            document.getElementById('elapsed').textContent = data.elapsed_s + 's';
+
+            const grid = document.getElementById('portGrid');
+            grid.innerHTML = data.ports.map(renderPortCard).join('');
+
+            const statusText = document.getElementById('statusText');
+            statusText.textContent = data.running
+                ? `Listening on ${data.ports.length} ports (${data.bind_ip})`
+                : 'Stopped';
+        }
+
+        async function poll() {
+            try {
+                const resp = await fetch('/api/status');
+                const data = await resp.json();
+                updateUI(data);
+            } catch (e) { /* ignore */ }
+        }
+
+        document.getElementById('btnStart').addEventListener('click', async () => {
+            await fetch('/api/start', { method: 'POST' });
+            poll();
+        });
+
+        document.getElementById('btnStop').addEventListener('click', async () => {
+            await fetch('/api/stop', { method: 'POST' });
+            poll();
+        });
+
+        setInterval(poll, 1000);
+        poll();
+    </script>
+</body>
+</html>
