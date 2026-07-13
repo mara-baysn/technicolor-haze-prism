@@ -1,6 +1,11 @@
 /*
- * DOCA Flow CT Firewall - Flow Initialization Implementation
- * Sets up DOCA Flow in switch mode with CT pipeline.
+ * DOCA Flow CT Firewall - Flow Initialization
+ *
+ * Creates the DOCA Flow pipe chain for the CT firewall.
+ * Port initialization is handled by the DOCA sample framework
+ * (init_doca_flow_switch_ports via flow_switch_common).
+ *
+ * Pipeline: ROOT (control) -> CT pipe -> [HIT: post-CT fwd | MISS: RSS to ARM]
  */
 
 #include <string.h>
@@ -12,39 +17,20 @@
 
 #include <rte_ethdev.h>
 
+#include <flow_common.h>
+#include <flow_switch_common.h>
+#include <flow_ct_common.h>
+#include <dpdk_utils.h>
+
 #include "flow_init.h"
 
 DOCA_LOG_REGISTER(FW_FLOW_INIT);
-
-/* Port devargs for switch mode representors */
-static const char *port_devargs[NUM_PORTS] = {
-    "representor=pf0hpf",   /* uplink PF representor */
-    "representor=pf0vf0",   /* VF0 - internet */
-    "representor=pf0vf1",   /* VF1 - firewall in */
-    "representor=pf0vf2",   /* VF2 - firewall out */
-    "representor=pf0vf3",   /* VF3 - client */
-};
-
-/* Entry process callback */
-static void entry_process_cb(struct doca_flow_pipe_entry *entry,
-                             uint16_t pipe_queue,
-                             enum doca_flow_entry_status status,
-                             enum doca_flow_entry_op op,
-                             void *user_ctx)
-{
-    (void)entry;
-    (void)pipe_queue;
-    (void)user_ctx;
-
-    if (status != DOCA_FLOW_ENTRY_STATUS_SUCCESS) {
-        DOCA_LOG_WARN("Entry operation %d failed with status %d", op, status);
-    }
-}
 
 /*
  * Create RSS pipe for sending CT MISS traffic to ARM cores.
  */
 static doca_error_t create_rss_pipe(struct doca_flow_port *port,
+                                    struct entries_status *status,
                                     struct doca_flow_pipe **pipe)
 {
     struct doca_flow_match match;
@@ -62,28 +48,24 @@ static doca_error_t create_rss_pipe(struct doca_flow_port *port,
         return result;
     }
 
-    result = doca_flow_pipe_cfg_set_name(cfg, "RSS_MISS_PIPE");
-    if (result != DOCA_SUCCESS)
+    result = set_flow_pipe_cfg(cfg, "RSS_MISS_PIPE", DOCA_FLOW_PIPE_BASIC, false);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set RSS pipe cfg: %s", doca_error_get_descr(result));
         goto destroy_cfg;
-
-    result = doca_flow_pipe_cfg_set_type(cfg, DOCA_FLOW_PIPE_BASIC);
-    if (result != DOCA_SUCCESS)
-        goto destroy_cfg;
-
-    result = doca_flow_pipe_cfg_set_nr_entries(cfg, 1);
-    if (result != DOCA_SUCCESS)
-        goto destroy_cfg;
+    }
 
     result = doca_flow_pipe_cfg_set_match(cfg, &match, NULL);
-    if (result != DOCA_SUCCESS)
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set RSS pipe match: %s", doca_error_get_descr(result));
         goto destroy_cfg;
+    }
 
-    /* RSS to queue 0 on this port (switch port) */
+    /* RSS to queue 0 - use only IPv4 hash (TCP/UDP cannot be combined) */
     fwd.type = DOCA_FLOW_FWD_RSS;
     fwd.rss_type = DOCA_FLOW_RESOURCE_TYPE_NON_SHARED;
     fwd.rss.queues_array = rss_queues;
     fwd.rss.nr_queues = 1;
-    fwd.rss.outer_flags = DOCA_FLOW_RSS_IPV4 | DOCA_FLOW_RSS_TCP | DOCA_FLOW_RSS_UDP;
+    fwd.rss.outer_flags = DOCA_FLOW_RSS_IPV4 | DOCA_FLOW_RSS_TCP;
 
     result = doca_flow_pipe_create(cfg, &fwd, NULL, pipe);
     if (result != DOCA_SUCCESS) {
@@ -92,17 +74,16 @@ static doca_error_t create_rss_pipe(struct doca_flow_port *port,
     }
     doca_flow_pipe_cfg_destroy(cfg);
 
-    /* Add a wildcard entry to match all traffic */
-    result = doca_flow_pipe_basic_add_entry(0, *pipe, &match, 0, NULL, NULL, &fwd, 0, NULL, NULL);
+    /* Add wildcard entry */
+    result = doca_flow_pipe_basic_add_entry(0, *pipe, &match, 0, NULL, NULL, &fwd, 0, status, NULL);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to add RSS pipe entry: %s", doca_error_get_descr(result));
         return result;
     }
 
     result = doca_flow_entries_process(port, 0, DEFAULT_TIMEOUT_US, 0);
-    if (result != DOCA_SUCCESS) {
+    if (result != DOCA_SUCCESS)
         DOCA_LOG_ERR("Failed to process RSS entry: %s", doca_error_get_descr(result));
-    }
 
     DOCA_LOG_INFO("RSS pipe created successfully");
     return result;
@@ -114,10 +95,11 @@ destroy_cfg:
 
 /*
  * Create post-CT forwarding pipe.
- * CT HIT traffic goes here: VF0->VF3 or VF3->VF0 based on port_meta.
- * For simplicity, forward all CT HIT to VF3 (client) in origin direction.
+ * CT HIT traffic goes here. Forward to port 1 (first representor) by default.
  */
 static doca_error_t create_post_ct_pipe(struct doca_flow_port *port,
+                                        int fwd_port_id,
+                                        struct entries_status *status,
                                         struct doca_flow_pipe **pipe)
 {
     struct doca_flow_match match;
@@ -134,25 +116,21 @@ static doca_error_t create_post_ct_pipe(struct doca_flow_port *port,
         return result;
     }
 
-    result = doca_flow_pipe_cfg_set_name(cfg, "POST_CT_FWD_PIPE");
-    if (result != DOCA_SUCCESS)
+    result = set_flow_pipe_cfg(cfg, "POST_CT_FWD_PIPE", DOCA_FLOW_PIPE_BASIC, false);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set post-CT pipe cfg: %s", doca_error_get_descr(result));
         goto destroy_cfg;
-
-    result = doca_flow_pipe_cfg_set_type(cfg, DOCA_FLOW_PIPE_BASIC);
-    if (result != DOCA_SUCCESS)
-        goto destroy_cfg;
-
-    result = doca_flow_pipe_cfg_set_nr_entries(cfg, 4);
-    if (result != DOCA_SUCCESS)
-        goto destroy_cfg;
+    }
 
     result = doca_flow_pipe_cfg_set_match(cfg, &match, NULL);
-    if (result != DOCA_SUCCESS)
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set post-CT pipe match: %s", doca_error_get_descr(result));
         goto destroy_cfg;
+    }
 
-    /* Default forward to VF3 (client) port_id=4 */
+    /* Forward CT HIT traffic to the representor port */
     fwd.type = DOCA_FLOW_FWD_PORT;
-    fwd.port_id = PORT_VF3;
+    fwd.port_id = fwd_port_id;
 
     result = doca_flow_pipe_create(cfg, &fwd, NULL, pipe);
     if (result != DOCA_SUCCESS) {
@@ -162,18 +140,17 @@ static doca_error_t create_post_ct_pipe(struct doca_flow_port *port,
     doca_flow_pipe_cfg_destroy(cfg);
 
     /* Add wildcard entry */
-    result = doca_flow_pipe_basic_add_entry(0, *pipe, &match, 0, NULL, NULL, &fwd, 0, NULL, NULL);
+    result = doca_flow_pipe_basic_add_entry(0, *pipe, &match, 0, NULL, NULL, &fwd, 0, status, NULL);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to add post-CT pipe entry: %s", doca_error_get_descr(result));
         return result;
     }
 
     result = doca_flow_entries_process(port, 0, DEFAULT_TIMEOUT_US, 0);
-    if (result != DOCA_SUCCESS) {
+    if (result != DOCA_SUCCESS)
         DOCA_LOG_ERR("Failed to process post-CT entry: %s", doca_error_get_descr(result));
-    }
 
-    DOCA_LOG_INFO("Post-CT forwarding pipe created successfully");
+    DOCA_LOG_INFO("Post-CT forwarding pipe created (fwd to port %d)", fwd_port_id);
     return result;
 
 destroy_cfg:
@@ -183,8 +160,8 @@ destroy_cfg:
 
 /*
  * Create the CT pipe.
- * HIT → post_ct_pipe (forwarding)
- * MISS → rss_pipe (to ARM for policy evaluation)
+ * HIT -> post_ct_pipe (forwarding)
+ * MISS -> rss_pipe (to ARM for policy evaluation)
  */
 static doca_error_t create_ct_pipe(struct doca_flow_port *port,
                                    struct doca_flow_pipe *post_ct_pipe,
@@ -207,17 +184,11 @@ static doca_error_t create_ct_pipe(struct doca_flow_port *port,
         return result;
     }
 
-    result = doca_flow_pipe_cfg_set_name(cfg, "CT_PIPE");
-    if (result != DOCA_SUCCESS)
+    result = set_flow_pipe_cfg(cfg, "CT_PIPE", DOCA_FLOW_PIPE_CT, false);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set CT pipe cfg: %s", doca_error_get_descr(result));
         goto destroy_cfg;
-
-    result = doca_flow_pipe_cfg_set_type(cfg, DOCA_FLOW_PIPE_CT);
-    if (result != DOCA_SUCCESS)
-        goto destroy_cfg;
-
-    result = doca_flow_pipe_cfg_set_match(cfg, &match, NULL);
-    if (result != DOCA_SUCCESS)
-        goto destroy_cfg;
+    }
 
     result = doca_flow_pipe_cfg_set_ct_connections(cfg, MAX_IPV4_SESSIONS, MAX_IPV6_SESSIONS, 0);
     if (result != DOCA_SUCCESS) {
@@ -225,11 +196,17 @@ static doca_error_t create_ct_pipe(struct doca_flow_port *port,
         goto destroy_cfg;
     }
 
-    /* CT HIT → post-CT forwarding pipe */
+    result = doca_flow_pipe_cfg_set_match(cfg, &match, NULL);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set CT pipe match: %s", doca_error_get_descr(result));
+        goto destroy_cfg;
+    }
+
+    /* CT HIT -> post-CT forwarding pipe */
     fwd.type = DOCA_FLOW_FWD_PIPE;
     fwd.next_pipe = post_ct_pipe;
 
-    /* CT MISS → RSS to ARM for policy eval */
+    /* CT MISS -> RSS to ARM for policy eval */
     fwd_miss.type = DOCA_FLOW_FWD_PIPE;
     fwd_miss.next_pipe = rss_pipe;
 
@@ -253,6 +230,7 @@ destroy_cfg:
  */
 static doca_error_t create_root_pipe(struct doca_flow_port *port,
                                      struct doca_flow_pipe *ct_pipe,
+                                     struct entries_status *status,
                                      struct doca_flow_pipe **pipe)
 {
     struct doca_flow_pipe_cfg *cfg;
@@ -271,17 +249,11 @@ static doca_error_t create_root_pipe(struct doca_flow_port *port,
         return result;
     }
 
-    result = doca_flow_pipe_cfg_set_name(cfg, "ROOT_CONTROL_PIPE");
-    if (result != DOCA_SUCCESS)
+    result = set_flow_pipe_cfg(cfg, "ROOT_CONTROL_PIPE", DOCA_FLOW_PIPE_CONTROL, true);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set root pipe cfg: %s", doca_error_get_descr(result));
         goto destroy_cfg;
-
-    result = doca_flow_pipe_cfg_set_type(cfg, DOCA_FLOW_PIPE_CONTROL);
-    if (result != DOCA_SUCCESS)
-        goto destroy_cfg;
-
-    result = doca_flow_pipe_cfg_set_is_root(cfg, true);
-    if (result != DOCA_SUCCESS)
-        goto destroy_cfg;
+    }
 
     result = doca_flow_pipe_create(cfg, NULL, NULL, pipe);
     if (result != DOCA_SUCCESS) {
@@ -290,7 +262,7 @@ static doca_error_t create_root_pipe(struct doca_flow_port *port,
     }
     doca_flow_pipe_cfg_destroy(cfg);
 
-    /* Entry: Match IPv4 TCP → CT pipe (priority 1) */
+    /* Entry: Match IPv4 TCP -> CT pipe (priority 1) */
     struct doca_flow_pipe_entry *entry = NULL;
 
     memset(&match, 0, sizeof(match));
@@ -311,7 +283,7 @@ static doca_error_t create_root_pipe(struct doca_flow_port *port,
         return result;
     }
 
-    /* Entry: Match IPv4 UDP → CT pipe (priority 2) */
+    /* Entry: Match IPv4 UDP -> CT pipe (priority 2) */
     memset(&match, 0, sizeof(match));
     memset(&mask, 0, sizeof(mask));
     match.outer.l3_type = DOCA_FLOW_L3_TYPE_IP4;
@@ -328,11 +300,10 @@ static doca_error_t create_root_pipe(struct doca_flow_port *port,
     }
 
     result = doca_flow_entries_process(port, 0, DEFAULT_TIMEOUT_US, 0);
-    if (result != DOCA_SUCCESS) {
+    if (result != DOCA_SUCCESS)
         DOCA_LOG_ERR("Failed to process root entries: %s", doca_error_get_descr(result));
-    }
 
-    DOCA_LOG_INFO("Root control pipe created with TCP+UDP -> CT steering");
+    DOCA_LOG_INFO("Root control pipe created: IPv4 TCP+UDP -> CT");
     return result;
 
 destroy_cfg:
@@ -340,225 +311,114 @@ destroy_cfg:
     return result;
 }
 
-/*
- * Initialize DOCA Flow global configuration.
- */
-static doca_error_t init_doca_flow(uint16_t nb_queues)
-{
-    struct doca_flow_cfg *cfg;
-    doca_error_t result;
-
-    result = doca_flow_cfg_create(&cfg);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to create flow cfg: %s", doca_error_get_descr(result));
-        return result;
-    }
-
-    result = doca_flow_cfg_set_pipe_queues(cfg, nb_queues);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to set pipe queues: %s", doca_error_get_descr(result));
-        goto destroy;
-    }
-
-    /* Switch mode with HWS (hardware steering) */
-    result = doca_flow_cfg_set_mode_args(cfg, "switch,hws,expert");
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to set mode args: %s", doca_error_get_descr(result));
-        goto destroy;
-    }
-
-    result = doca_flow_cfg_set_nr_counters(cfg, 1024);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to set nr_counters: %s", doca_error_get_descr(result));
-        goto destroy;
-    }
-
-    result = doca_flow_cfg_set_cb_entry_process(cfg, entry_process_cb);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to set entry callback: %s", doca_error_get_descr(result));
-        goto destroy;
-    }
-
-    result = doca_flow_init(cfg);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to init DOCA Flow: %s", doca_error_get_descr(result));
-        goto destroy;
-    }
-
-    doca_flow_cfg_destroy(cfg);
-    DOCA_LOG_INFO("DOCA Flow initialized in switch mode (HWS)");
-    return DOCA_SUCCESS;
-
-destroy:
-    doca_flow_cfg_destroy(cfg);
-    return result;
-}
-
-/*
- * Initialize DOCA Flow CT subsystem.
- */
-static doca_error_t init_doca_flow_ct(uint16_t nb_queues)
-{
-    struct doca_flow_ct_cfg *cfg;
-    struct doca_flow_meta zone_mask;
-    struct doca_flow_ct_meta modify_mask;
-    doca_error_t result;
-
-    result = doca_flow_ct_cfg_create(&cfg);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to create CT cfg: %s", doca_error_get_descr(result));
-        return result;
-    }
-
-    result = doca_flow_ct_cfg_set_flags(cfg, DOCA_FLOW_CT_FLAG_NO_AGING);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to set CT flags: %s", doca_error_get_descr(result));
-        goto destroy;
-    }
-
-    result = doca_flow_ct_cfg_set_queues(cfg, nb_queues);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to set CT queues: %s", doca_error_get_descr(result));
-        goto destroy;
-    }
-
-    result = doca_flow_ct_cfg_set_ctrl_queues(cfg, 1);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to set CT ctrl queues: %s", doca_error_get_descr(result));
-        goto destroy;
-    }
-
-    /* No zone masking */
-    memset(&zone_mask, 0, sizeof(zone_mask));
-    memset(&modify_mask, 0, sizeof(modify_mask));
-
-    result = doca_flow_ct_cfg_set_direction(cfg, false, false, &zone_mask, &modify_mask);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to set CT origin direction: %s", doca_error_get_descr(result));
-        goto destroy;
-    }
-
-    result = doca_flow_ct_cfg_set_direction(cfg, true, false, &zone_mask, &modify_mask);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to set CT reply direction: %s", doca_error_get_descr(result));
-        goto destroy;
-    }
-
-    result = doca_flow_ct_init(cfg);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to init DOCA Flow CT: %s", doca_error_get_descr(result));
-        goto destroy;
-    }
-
-    doca_flow_ct_cfg_destroy(cfg);
-    DOCA_LOG_INFO("DOCA Flow CT initialized (no aging, %u queues)", nb_queues);
-    return DOCA_SUCCESS;
-
-destroy:
-    doca_flow_ct_cfg_destroy(cfg);
-    return result;
-}
-
-/*
- * Start ports in switch mode.
- */
-static doca_error_t start_ports(struct fw_flow_ctx *ctx)
+doca_error_t fw_flow_init(struct fw_flow_ctx *ctx, struct flow_switch_ctx *switch_ctx)
 {
     doca_error_t result;
-
-    for (int i = 0; i < NUM_PORTS; i++) {
-        struct doca_flow_port_cfg *port_cfg;
-
-        result = doca_flow_port_cfg_create(&port_cfg);
-        if (result != DOCA_SUCCESS) {
-            DOCA_LOG_ERR("Failed to create port cfg for port %d: %s",
-                         i, doca_error_get_descr(result));
-            return result;
-        }
-
-        result = doca_flow_port_cfg_set_devargs(port_cfg, port_devargs[i]);
-        if (result != DOCA_SUCCESS) {
-            DOCA_LOG_ERR("Failed to set port %d devargs: %s",
-                         i, doca_error_get_descr(result));
-            doca_flow_port_cfg_destroy(port_cfg);
-            return result;
-        }
-
-        result = doca_flow_port_start(port_cfg, &ctx->ports[i]);
-        if (result != DOCA_SUCCESS) {
-            DOCA_LOG_ERR("Failed to start port %d (%s): %s",
-                         i, port_devargs[i], doca_error_get_descr(result));
-            doca_flow_port_cfg_destroy(port_cfg);
-            return result;
-        }
-
-        doca_flow_port_cfg_destroy(port_cfg);
-        DOCA_LOG_INFO("Port %d started: %s", i, port_devargs[i]);
-    }
-
-    /* Get the switch port (port 0 is the switch manager in switch mode) */
-    ctx->switch_port = doca_flow_port_switch_get(ctx->ports[0]);
-    if (ctx->switch_port == NULL) {
-        DOCA_LOG_ERR("Failed to get switch port");
-        return DOCA_ERROR_INITIALIZATION;
-    }
-
-    DOCA_LOG_INFO("All %d ports started, switch port acquired", NUM_PORTS);
-    return DOCA_SUCCESS;
-}
-
-doca_error_t fw_flow_init(struct fw_flow_ctx *ctx)
-{
-    doca_error_t result;
+    const int nb_entries = 4;  /* RSS + post-CT + 2 root entries */
+    struct flow_resources resource;
+    uint32_t nr_shared_resources[SHARED_RESOURCE_NUM_VALUES] = {0};
+    struct doca_flow_meta o_zone_mask, r_zone_mask;
+    struct doca_flow_ct_meta o_modify_mask, r_modify_mask;
+    struct entries_status ctrl_status;
+    uint32_t ct_flags;
+    uint32_t nb_arm_queues = 1, nb_ctrl_queues = 1, ct_actions_mem_size = 0;
 
     memset(ctx, 0, sizeof(*ctx));
+    memset(&ctrl_status, 0, sizeof(ctrl_status));
+    memset(&resource, 0, sizeof(resource));
+
     ctx->nb_queues = NB_QUEUES;
 
-    /* 1. Initialize DOCA Flow */
-    result = init_doca_flow(ctx->nb_queues);
-    if (result != DOCA_SUCCESS)
+    /* Determine number of ports based on discovered devices */
+    ctx->nb_ports = switch_ctx->devs_ctx.devs_manager[0].nb_reps > 0 ? 2 : 1;
+    DOCA_LOG_INFO("Configuring %d flow ports", ctx->nb_ports);
+
+    /* Configure resources in port mode */
+    resource.mode = DOCA_FLOW_RESOURCE_MODE_PORT;
+    resource.nr_counters = 1024;
+    resource.nr_ct_counters = MAX_IPV4_SESSIONS + MAX_IPV6_SESSIONS;
+    resource.nr_rss = 1;
+
+    /* 1. Initialize DOCA Flow library */
+    result = init_doca_flow(ctx->nb_queues, "switch,hws,expert", &resource, nr_shared_resources);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to init DOCA Flow: %s", doca_error_get_descr(result));
         return result;
+    }
 
     /* 2. Initialize DOCA Flow CT */
-    result = init_doca_flow_ct(ctx->nb_queues);
+    memset(&o_zone_mask, 0, sizeof(o_zone_mask));
+    memset(&o_modify_mask, 0, sizeof(o_modify_mask));
+    memset(&r_zone_mask, 0, sizeof(r_zone_mask));
+    memset(&r_modify_mask, 0, sizeof(r_modify_mask));
+
+    ct_flags = DOCA_FLOW_CT_FLAG_NO_AGING;
+    result = init_doca_flow_ct(ct_flags,
+                               nb_arm_queues,
+                               nb_ctrl_queues,
+                               ct_actions_mem_size,
+                               NULL,
+                               false,
+                               &o_zone_mask,
+                               &o_modify_mask,
+                               false,
+                               &r_zone_mask,
+                               &r_modify_mask);
     if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to init DOCA Flow CT: %s", doca_error_get_descr(result));
         doca_flow_destroy();
         return result;
     }
 
-    /* 3. Start all ports */
-    result = start_ports(ctx);
+    /* 3. Start ports using framework (handles doca_dev / doca_dev_rep properly) */
+    uint32_t actions_mem_size[MAX_PORTS];
+    ARRAY_INIT(actions_mem_size, ACTIONS_MEM_SIZE(nb_entries));
+
+    result = init_doca_flow_switch_ports(switch_ctx->devs_ctx.devs_manager,
+                                         switch_ctx->devs_ctx.nb_devs,
+                                         ctx->ports,
+                                         ctx->nb_ports,
+                                         actions_mem_size,
+                                         &resource);
     if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to init switch ports: %s", doca_error_get_descr(result));
         doca_flow_ct_destroy();
         doca_flow_destroy();
         return result;
     }
 
-    /* 4. Create pipe chain on the switch port:
-     *    ROOT (control) → CT pipe → post-CT forwarding
-     *    CT MISS → RSS to ARM
-     */
+    DOCA_LOG_INFO("Switch ports started successfully");
 
-    /* Create RSS pipe first (CT MISS target) */
-    result = create_rss_pipe(ctx->switch_port, &ctx->rss_pipe);
+    /* 4. Create pipe chain on port 0 (the switch port) */
+
+    /* Create RSS pipe (CT MISS target) */
+    result = create_rss_pipe(ctx->ports[0], &ctrl_status, &ctx->rss_pipe);
     if (result != DOCA_SUCCESS)
         goto cleanup;
 
     /* Create post-CT forwarding pipe (CT HIT target) */
-    result = create_post_ct_pipe(ctx->switch_port, &ctx->post_ct_fwd_pipe);
+    int fwd_port_id = ctx->nb_ports > 1 ? 1 : 0;
+    result = create_post_ct_pipe(ctx->ports[0], fwd_port_id, &ctrl_status, &ctx->post_ct_fwd_pipe);
     if (result != DOCA_SUCCESS)
         goto cleanup;
 
     /* Create CT pipe */
-    result = create_ct_pipe(ctx->switch_port, ctx->post_ct_fwd_pipe,
+    result = create_ct_pipe(ctx->ports[0], ctx->post_ct_fwd_pipe,
                             ctx->rss_pipe, &ctx->ct_pipe);
     if (result != DOCA_SUCCESS)
         goto cleanup;
 
     /* Create root control pipe steering into CT */
-    result = create_root_pipe(ctx->switch_port, ctx->ct_pipe, &ctx->root_pipe);
+    result = create_root_pipe(ctx->ports[0], ctx->ct_pipe, &ctrl_status, &ctx->root_pipe);
     if (result != DOCA_SUCCESS)
         goto cleanup;
+
+    /* Process all pending entries */
+    result = doca_flow_entries_process(ctx->ports[0], 0, DEFAULT_TIMEOUT_US, nb_entries);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to process pipe entries: %s", doca_error_get_descr(result));
+        goto cleanup;
+    }
 
     DOCA_LOG_INFO("Flow pipeline initialized: ROOT -> CT -> [HIT: forward | MISS: RSS to ARM]");
     return DOCA_SUCCESS;
@@ -572,7 +432,8 @@ void fw_flow_destroy(struct fw_flow_ctx *ctx)
 {
     DOCA_LOG_INFO("Destroying flow resources...");
 
-    for (int i = 0; i < NUM_PORTS; i++) {
+    /* Stop ports in reverse order (switch port last) */
+    for (int i = ctx->nb_ports - 1; i >= 0; i--) {
         if (ctx->ports[i]) {
             doca_flow_port_stop(ctx->ports[i]);
             ctx->ports[i] = NULL;

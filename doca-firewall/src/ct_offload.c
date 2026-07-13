@@ -125,6 +125,19 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
 
     atomic_fetch_add(&ctx->metrics->pkts_received, 1);
 
+    /* DEBUG: dump first 64 bytes of first 10 packets */
+    if (ctx->metrics->pkts_received <= 10) {
+        uint8_t *data = rte_pktmbuf_mtod(pkt, uint8_t *);
+        uint16_t len = pkt->data_len > 64 ? 64 : pkt->data_len;
+        char hexbuf[200];
+        memset(hexbuf, 0, sizeof(hexbuf));
+        for (int hx = 0; hx < (int)len && hx < 64; hx++)
+            sprintf(hexbuf + hx*3, "%02x ", data[hx]);
+        DOCA_LOG_INFO("RX pkt[%lu] len=%u data_off=%u: %s",
+                      (unsigned long)ctx->metrics->pkts_received, pkt->data_len,
+                      pkt->data_off, hexbuf);
+    }
+
     /* Parse the packet */
     if (!parse_ipv4_packet(pkt, &match_o, &match_r,
                            &src_ip, &dst_ip, &src_port, &dst_port, &protocol)) {
@@ -162,11 +175,12 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
     memset(&fwd_origin, 0, sizeof(fwd_origin));
     memset(&fwd_reply, 0, sizeof(fwd_reply));
 
+    /* Forward origin to representor (port 1), reply back to switch (port 0) */
     fwd_origin.type = DOCA_FLOW_FWD_PORT;
-    fwd_origin.port_id = PORT_VF3;
+    fwd_origin.port_id = ctx->flow_ctx->nb_ports > 1 ? 1 : 0;
 
     fwd_reply.type = DOCA_FLOW_FWD_PORT;
-    fwd_reply.port_id = PORT_VF0;
+    fwd_reply.port_id = 0;
 
     struct doca_flow_pipe_entry *entry = NULL;
     result = doca_flow_ct_add_entry(CT_QUEUE,
@@ -222,8 +236,8 @@ void ct_offload_main_loop(struct ct_offload_ctx *ctx)
             ct_offload_process_packet(ctx, pkts[i], 0);
         }
 
-        /* Process any pending CT entries */
-        doca_flow_ct_entries_process(ctx->flow_ctx->switch_port,
+        /* Process any pending CT entries on port 0 (switch port) */
+        doca_flow_ct_entries_process(ctx->flow_ctx->ports[0],
                                      CT_QUEUE, 0, 0, NULL);
     }
 
