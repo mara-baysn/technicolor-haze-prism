@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prism Traffic Generator</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0f1419;
+            color: #e7e9ea;
+            padding: 2rem;
+        }
+        h1 { color: #1d9bf0; margin-bottom: 0.5rem; }
+        .subtitle { color: #71767b; margin-bottom: 2rem; }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        .card {
+            background: #1e2732;
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid #2f3336;
+        }
+        .card .label { color: #71767b; font-size: 0.85rem; text-transform: uppercase; }
+        .card .value { font-size: 2rem; font-weight: 700; margin-top: 0.5rem; }
+        .card .value.running { color: #00ba7c; }
+        .card .value.stopped { color: #f4212e; }
+
+        .controls {
+            background: #1e2732;
+            border-radius: 12px;
+            padding: 2rem;
+            border: 1px solid #2f3336;
+            margin-bottom: 2rem;
+        }
+        .control-row {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+        .control-row:last-child { margin-bottom: 0; }
+        label { min-width: 80px; color: #71767b; }
+
+        select, input[type=range] { flex: 1; }
+        select {
+            background: #0f1419;
+            color: #e7e9ea;
+            border: 1px solid #2f3336;
+            border-radius: 6px;
+            padding: 0.5rem;
+            font-size: 1rem;
+        }
+        input[type=range] {
+            -webkit-appearance: none;
+            height: 6px;
+            background: #2f3336;
+            border-radius: 3px;
+            outline: none;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #1d9bf0;
+            cursor: pointer;
+        }
+        .rate-display { min-width: 100px; text-align: right; font-weight: 600; }
+
+        .btn-row { display: flex; gap: 1rem; margin-top: 1.5rem; }
+        button {
+            padding: 0.75rem 2rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        button:hover { opacity: 0.85; }
+        .btn-start { background: #00ba7c; color: #fff; }
+        .btn-stop { background: #f4212e; color: #fff; }
+        .btn-start:disabled, .btn-stop:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 0.5rem;
+        }
+        .status-dot.on { background: #00ba7c; animation: pulse 1.5s infinite; }
+        .status-dot.off { background: #71767b; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+    </style>
+</head>
+<body>
+    <h1>Prism Traffic Generator</h1>
+    <p class="subtitle">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Initializing...</span>
+        &mdash; Source: 10.0.1.1 (ens8f0v0) &rarr; Dest: 10.0.2.1
+    </p>
+
+    <div class="grid">
+        <div class="card">
+            <div class="label">Packets Sent</div>
+            <div class="value" id="packetsSent">0</div>
+        </div>
+        <div class="card">
+            <div class="label">Bytes Sent</div>
+            <div class="value" id="bytesSent">0</div>
+        </div>
+        <div class="card">
+            <div class="label">Active Flows</div>
+            <div class="value" id="activeFlows">0</div>
+        </div>
+        <div class="card">
+            <div class="label">Current PPS</div>
+            <div class="value" id="currentPps">0</div>
+        </div>
+        <div class="card">
+            <div class="label">Errors</div>
+            <div class="value" id="errors">0</div>
+        </div>
+        <div class="card">
+            <div class="label">Elapsed</div>
+            <div class="value" id="elapsed">0s</div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <div class="control-row">
+            <label>Profile</label>
+            <select id="profile">
+                {% for p in profiles %}
+                <option value="{{ p }}" {{ 'selected' if p == current_profile else '' }}>
+                    {{ p | upper }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="control-row">
+            <label>Rate</label>
+            <input type="range" id="rateSlider" min="100" max="50000" step="100" value="{{ rate }}">
+            <span class="rate-display" id="rateDisplay">{{ rate }} pps</span>
+        </div>
+        <div class="btn-row">
+            <button class="btn-start" id="btnStart" {{ 'disabled' if running else '' }}>Start</button>
+            <button class="btn-stop" id="btnStop" {{ 'disabled' if not running else '' }}>Stop</button>
+        </div>
+    </div>
+
+    <script>
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const rateSlider = document.getElementById('rateSlider');
+        const rateDisplay = document.getElementById('rateDisplay');
+        const btnStart = document.getElementById('btnStart');
+        const btnStop = document.getElementById('btnStop');
+
+        function formatBytes(b) {
+            if (b < 1024) return b + ' B';
+            if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+            if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+            return (b / 1073741824).toFixed(2) + ' GB';
+        }
+
+        function updateUI(data) {
+            const s = data.stats;
+            document.getElementById('packetsSent').textContent = s.packets_sent.toLocaleString();
+            document.getElementById('bytesSent').textContent = formatBytes(s.bytes_sent);
+            document.getElementById('activeFlows').textContent = s.active_flows;
+            document.getElementById('currentPps').textContent = s.current_pps.toLocaleString();
+            document.getElementById('errors').textContent = s.errors;
+            document.getElementById('elapsed').textContent = s.elapsed_s + 's';
+
+            if (data.running) {
+                statusDot.className = 'status-dot on';
+                statusText.textContent = 'Generating (' + data.profile.toUpperCase() + ')';
+                btnStart.disabled = true;
+                btnStop.disabled = false;
+            } else {
+                statusDot.className = 'status-dot off';
+                statusText.textContent = 'Stopped';
+                btnStart.disabled = false;
+                btnStop.disabled = true;
+            }
+        }
+
+        async function poll() {
+            try {
+                const resp = await fetch('/api/status');
+                const data = await resp.json();
+                updateUI(data);
+            } catch (e) { /* ignore transient errors */ }
+        }
+
+        rateSlider.addEventListener('input', () => {
+            rateDisplay.textContent = parseInt(rateSlider.value).toLocaleString() + ' pps';
+        });
+
+        rateSlider.addEventListener('change', async () => {
+            await fetch('/api/rate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ rate: parseInt(rateSlider.value) })
+            });
+        });
+
+        btnStart.addEventListener('click', async () => {
+            const profile = document.getElementById('profile').value;
+            const rate = parseInt(rateSlider.value);
+            await fetch('/api/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ profile, rate })
+            });
+            poll();
+        });
+
+        btnStop.addEventListener('click', async () => {
+            await fetch('/api/stop', { method: 'POST' });
+            poll();
+        });
+
+        setInterval(poll, 1000);
+        poll();
+    </script>
+</body>
+</html>
