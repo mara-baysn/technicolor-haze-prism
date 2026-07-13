@@ -247,14 +247,11 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
     DOCA_LOG_INFO("CT OFFLOADED: %s:%u -> %s:%u proto=%u (VF0<->VF3)",
                   src_str, src_port, dst_str, dst_port, protocol);
 
-    /* Forward this first packet via switch port (port 0).
-     * The packet's dst MAC is already VF3's MAC (from static ARP on sender),
-     * so the eSwitch FDB will deliver it to VF3. */
-    uint16_t nb_tx = rte_eth_tx_burst(0, 0, &pkt, 1);
-    if (nb_tx == 0) {
-        DOCA_LOG_WARN("Failed to TX first packet to switch port");
-        rte_pktmbuf_free(pkt);
-    }
+    /* First packet: TX via switch port (port 0). The eSwitch will deliver based on
+     * the CT entry we just created (which has FWD_PORT=4 for VF3).
+     * But the first packet itself won't match CT yet (just created), so we TX it
+     * back out port 0 and let the post-CT pipe or FDB deliver it. */
+    rte_pktmbuf_free(pkt);  /* Drop first pkt — TCP retransmit will use CT HIT path */
 }
 
 void ct_offload_main_loop(struct ct_offload_ctx *ctx)
@@ -262,13 +259,12 @@ void ct_offload_main_loop(struct ct_offload_ctx *ctx)
     struct rte_mbuf *pkts[PACKET_BURST];
     int nb_rx;
 
-    DOCA_LOG_INFO("Starting CT offload main loop (polling switch port queue 0)");
+    DOCA_LOG_INFO("Starting switch-mode main loop (RX on switch port 0, CT MISS path)");
 
     while (ctx->running) {
-        /* Poll for packets on the switch port (port 0) queue 0 */
+        /* Poll switch port (port 0) for CT MISS packets */
         nb_rx = rte_eth_rx_burst(0, 0, pkts, PACKET_BURST);
         if (nb_rx == 0) {
-            /* No packets, brief pause to avoid busy-spin burning CPU */
             usleep(10);
             continue;
         }

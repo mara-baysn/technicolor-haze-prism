@@ -14,6 +14,7 @@
 #include <doca_log.h>
 #include <doca_flow.h>
 #include <doca_flow_ct.h>
+#include <doca_dpdk.h>
 
 #include <rte_ethdev.h>
 
@@ -128,7 +129,7 @@ static doca_error_t create_post_ct_pipe(struct doca_flow_port *port,
         goto destroy_cfg;
     }
 
-    /* Forward CT HIT traffic to the representor port */
+    /* Forward CT HIT traffic to the VF3 representor port */
     fwd.type = DOCA_FLOW_FWD_PORT;
     fwd.port_id = fwd_port_id;
 
@@ -330,7 +331,7 @@ doca_error_t fw_flow_init(struct fw_flow_ctx *ctx, struct flow_switch_ctx *switc
     ctx->nb_queues = NB_QUEUES;
 
     /* Determine number of ports based on discovered devices */
-    /* Start all ports: 1 (switch/PF) + N representors */
+    /* Start all ports: switch + all VF representors */
     int nb_reps = switch_ctx->devs_ctx.devs_manager[0].nb_reps;
     ctx->nb_ports = 1 + (nb_reps > 0 ? nb_reps : 0);
     DOCA_LOG_INFO("Configuring %d flow ports", ctx->nb_ports);
@@ -341,7 +342,7 @@ doca_error_t fw_flow_init(struct fw_flow_ctx *ctx, struct flow_switch_ctx *switc
     resource.nr_ct_counters = MAX_IPV4_SESSIONS + MAX_IPV6_SESSIONS;
     resource.nr_rss = 1;
 
-    /* 1. Initialize DOCA Flow library */
+    /* 1. Initialize DOCA Flow library in switch mode */
     result = init_doca_flow(ctx->nb_queues, "switch,hws,expert", &resource, nr_shared_resources);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to init DOCA Flow: %s", doca_error_get_descr(result));
@@ -399,9 +400,10 @@ doca_error_t fw_flow_init(struct fw_flow_ctx *ctx, struct flow_switch_ctx *switc
         goto cleanup;
 
     /* Create post-CT forwarding pipe (CT HIT target)
-     * Forward to port 1 (first VF rep) for testing.
-     * DEBUG: testing if any port forwarding works at all */
-    int fwd_port_id = 1;
+     * Forward to port 4 = VF3 representor (client).
+     * With all 5 ports started and DPDK owning them, FWD_PORT(4) sends to
+     * port 4's DPDK RX queues. We'll drain those queues and TX to host. */
+    int fwd_port_id = 4;
     result = create_post_ct_pipe(ctx->ports[0], fwd_port_id, &ctrl_status, &ctx->post_ct_fwd_pipe);
     if (result != DOCA_SUCCESS)
         goto cleanup;
