@@ -1,7 +1,10 @@
 """Flask web UI for the Prism traffic receiver.
 
-Exposes a dashboard on port 5002 showing per-port packet/byte counters
-and active/blocked state for each port.
+Exposes a dashboard on port 5002 showing per-port connection/byte counters.
+Runs inside ns-client on the HPE server (listens on 10.0.2.1).
+
+When the DPU firewall blocks a port, that port's counters stop incrementing,
+providing visible proof that the firewall policy is working.
 """
 
 from __future__ import annotations
@@ -22,9 +25,19 @@ def index():
     return render_template("index.html", running=receiver.running)
 
 
+@app.route("/api/stats")
+def api_stats():
+    """Return current receiver statistics as JSON.
+
+    This is the primary endpoint used by the orchestrator.
+    """
+    receiver = get_receiver()
+    return jsonify(receiver.get_stats())
+
+
 @app.route("/api/status")
 def api_status():
-    """Return current receiver status as JSON."""
+    """Return current receiver status as JSON (backward compat)."""
     receiver = get_receiver()
     return jsonify(receiver.get_stats())
 

@@ -1,6 +1,7 @@
 /*
  * DOCA Flow CT Firewall - Flow Initialization
- * Port initialization and pipe creation for switch-mode CT firewall.
+ * Pipe creation for switch-mode CT firewall.
+ * Port initialization is handled by the DOCA sample framework.
  */
 
 #ifndef FLOW_INIT_H
@@ -11,24 +12,23 @@
 #include <doca_flow_ct.h>
 #include <doca_error.h>
 
-#define NUM_PORTS 5          /* uplink PF + 4 VF representors */
-#define PORT_UPLINK 0        /* pf0hpf */
-#define PORT_VF0    1        /* pf0vf0 - internet */
-#define PORT_VF1    2        /* pf0vf1 - firewall in */
-#define PORT_VF2    3        /* pf0vf2 - firewall out */
-#define PORT_VF3    4        /* pf0vf3 - client */
+#include <flow_switch_common.h>
+#include <flow_ct_common.h>
+#include <flow_common.h>
 
 #define NB_QUEUES          2
 #define CT_QUEUE           NB_QUEUES  /* CT queue offset after regular queues */
 #define MAX_IPV4_SESSIONS  8192
 #define MAX_IPV6_SESSIONS  0
 #define CT_AGING_TIMEOUT_S 300        /* 5 minutes idle timeout */
-#define DEFAULT_TIMEOUT_US 10000
+
+/* Number of ports: 1 switch port + representors discovered by framework */
+#define MAX_PORTS          8
 
 /* Global pipe and port handles */
 struct fw_flow_ctx {
-    struct doca_flow_port *ports[NUM_PORTS];
-    struct doca_flow_port *switch_port;
+    struct doca_flow_port *ports[MAX_PORTS];
+    int nb_ports;
 
     /* Pipes */
     struct doca_flow_pipe *root_pipe;
@@ -40,10 +40,15 @@ struct fw_flow_ctx {
 };
 
 /*
- * Initialize DOCA Flow in switch mode.
- * Creates ports, pipes, and sets up the CT pipeline.
+ * Initialize DOCA Flow pipes (CT pipeline).
+ * Ports are already initialized by the framework (init_doca_flow_switch_ports).
+ * This function creates the pipe chain: ROOT -> CT -> [HIT: forward | MISS: RSS]
+ *
+ * @ctx [out]: firewall flow context to fill
+ * @switch_ctx [in]: framework switch context with device/port info
+ * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
  */
-doca_error_t fw_flow_init(struct fw_flow_ctx *ctx);
+doca_error_t fw_flow_init(struct fw_flow_ctx *ctx, struct flow_switch_ctx *switch_ctx);
 
 /*
  * Destroy all flow resources.

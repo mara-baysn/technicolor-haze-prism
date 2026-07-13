@@ -18,6 +18,8 @@
 #include <doca_flow.h>
 #include <doca_flow_ct.h>
 
+#include <flow_common.h>
+
 #include "ct_offload.h"
 #include "flow_init.h"
 #include "policy.h"
@@ -125,6 +127,19 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
 
     atomic_fetch_add(&ctx->metrics->pkts_received, 1);
 
+    /* DEBUG: dump first 64 bytes of first 10 packets */
+    if (ctx->metrics->pkts_received <= 10) {
+        uint8_t *data = rte_pktmbuf_mtod(pkt, uint8_t *);
+        uint16_t len = pkt->data_len > 64 ? 64 : pkt->data_len;
+        char hexbuf[200];
+        memset(hexbuf, 0, sizeof(hexbuf));
+        for (int hx = 0; hx < (int)len && hx < 64; hx++)
+            sprintf(hexbuf + hx*3, "%02x ", data[hx]);
+        DOCA_LOG_INFO("RX pkt[%lu] len=%u data_off=%u: %s",
+                      (unsigned long)ctx->metrics->pkts_received, pkt->data_len,
+                      pkt->data_off, hexbuf);
+    }
+
     /* Parse the packet */
     if (!parse_ipv4_packet(pkt, &match_o, &match_r,
                            &src_ip, &dst_ip, &src_port, &dst_port, &protocol)) {
@@ -150,25 +165,50 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
     /* ALLOW: offload to CT */
     atomic_fetch_add(&ctx->metrics->pkts_allowed, 1);
 
+    uint32_t prepare_flags = DOCA_FLOW_CT_ENTRY_FLAGS_ALLOC_ON_MISS;
     uint32_t entry_flags = DOCA_FLOW_CT_ENTRY_FLAGS_NO_WAIT |
                            DOCA_FLOW_CT_ENTRY_FLAGS_DIR_ORIGIN |
                            DOCA_FLOW_CT_ENTRY_FLAGS_DIR_REPLY;
 
-    /* Set per-direction forwarding:
-     * Origin (VF0->VF3): forward to VF3 (port 4)
-     * Reply (VF3->VF0): forward to VF0 (port 1)
-     */
-    struct doca_flow_fwd fwd_origin, fwd_reply;
-    memset(&fwd_origin, 0, sizeof(fwd_origin));
-    memset(&fwd_reply, 0, sizeof(fwd_reply));
-
-    fwd_origin.type = DOCA_FLOW_FWD_PORT;
-    fwd_origin.port_id = PORT_VF3;
-
-    fwd_reply.type = DOCA_FLOW_FWD_PORT;
-    fwd_reply.port_id = PORT_VF0;
-
+    /* Step 1: Prepare (allocate) the CT entry */
     struct doca_flow_pipe_entry *entry = NULL;
+    bool conn_found = false;
+
+    result = doca_flow_ct_entry_prepare(CT_QUEUE,
+                                        ctx->flow_ctx->ct_pipe,
+                                        prepare_flags,
+                                        &match_o,
+                                        0,  /* hash_origin (auto) */
+                                        &match_r,
+                                        0,  /* hash_reply (auto) */
+                                        &entry,
+                                        &conn_found);
+    if (result != DOCA_SUCCESS) {
+        atomic_fetch_add(&ctx->metrics->ct_add_errors, 1);
+        DOCA_LOG_WARN("Failed to prepare CT entry: %s", doca_error_get_descr(result));
+        rte_pktmbuf_free(pkt);
+        return;
+    }
+
+    if (conn_found) {
+        /* Connection already exists in CT table */
+        rte_pktmbuf_free(pkt);
+        return;
+    }
+
+    /* Step 2: Add the CT entry with explicit per-direction forwarding */
+    struct doca_flow_fwd fwd_o, fwd_r;
+    memset(&fwd_o, 0, sizeof(fwd_o));
+    memset(&fwd_r, 0, sizeof(fwd_r));
+
+    /* Origin (VF0→VF3): forward to port 4 (VF3 rep) */
+    fwd_o.type = DOCA_FLOW_FWD_PORT;
+    fwd_o.port_id = 4;
+
+    /* Reply (VF3→VF0): forward to port 1 (VF0 rep) */
+    fwd_r.type = DOCA_FLOW_FWD_PORT;
+    fwd_r.port_id = 1;
+
     result = doca_flow_ct_add_entry(CT_QUEUE,
                                     ctx->flow_ctx->ct_pipe,
                                     entry_flags,
@@ -176,8 +216,8 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
                                     &match_r,
                                     NULL,  /* actions_origin */
                                     NULL,  /* actions_reply */
-                                    &fwd_origin,
-                                    &fwd_reply,
+                                    &fwd_o,
+                                    &fwd_r,
                                     CT_AGING_TIMEOUT_S,
                                     NULL,  /* usr_ctx */
                                     entry);
@@ -188,6 +228,17 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
         return;
     }
 
+    /* Step 3: Process the pending entry (NO_WAIT requires explicit process) */
+    uint32_t queue_room = 0;
+    result = doca_flow_ct_entries_process(ctx->flow_ctx->ports[0],
+                                          CT_QUEUE,
+                                          0,   /* min_room */
+                                          0,   /* max_processed: 0 = all */
+                                          &queue_room);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_WARN("Failed to process CT entries: %s", doca_error_get_descr(result));
+    }
+
     atomic_fetch_add(&ctx->metrics->sessions_offloaded, 1);
     atomic_fetch_add(&ctx->metrics->sessions_active, 1);
 
@@ -196,8 +247,14 @@ void ct_offload_process_packet(struct ct_offload_ctx *ctx,
     DOCA_LOG_INFO("CT OFFLOADED: %s:%u -> %s:%u proto=%u (VF0<->VF3)",
                   src_str, src_port, dst_str, dst_port, protocol);
 
-    /* Forward this first packet manually since CT was just created */
-    rte_eth_tx_burst(0, 0, &pkt, 1);
+    /* Forward first packet to VF3 via TX on port 4 (relay path).
+     * In switch mode, TX on a representor port delivers to the host VF. */
+    uint16_t tx_port = 4;  /* VF3 representor */
+    uint16_t nb_tx = rte_eth_tx_burst(tx_port, 0, &pkt, 1);
+    if (nb_tx == 0) {
+        DOCA_LOG_WARN("TX first packet to port %u failed", tx_port);
+        rte_pktmbuf_free(pkt);
+    }
 }
 
 void ct_offload_main_loop(struct ct_offload_ctx *ctx)
@@ -205,25 +262,37 @@ void ct_offload_main_loop(struct ct_offload_ctx *ctx)
     struct rte_mbuf *pkts[PACKET_BURST];
     int nb_rx;
 
-    DOCA_LOG_INFO("Starting CT offload main loop (polling switch port queue 0)");
+    DOCA_LOG_INFO("Starting firewall main loop (MISS on port 0 + relay on ports 1-4)");
 
     while (ctx->running) {
-        /* Poll for packets on the switch port (port 0) queue 0 */
+        /* 1. Poll switch port (port 0) for CT MISS packets — policy decisions */
         nb_rx = rte_eth_rx_burst(0, 0, pkts, PACKET_BURST);
+        if (nb_rx > 0) {
+            atomic_fetch_add(&ctx->metrics->rx_bursts, 1);
+            for (int i = 0; i < nb_rx; i++) {
+                ct_offload_process_packet(ctx, pkts[i], 0);
+            }
+        }
+
+        /* 2. Relay: poll VF representor ports and TX back (delivers to host VF).
+         * CT HIT packets arrive at rep port's DPDK RX; TX on same port delivers to host.
+         * This gives us 100G for bulk traffic on 1-2 ARM cores. */
+        for (uint16_t p = 1; p < ctx->flow_ctx->nb_ports && p < 5; p++) {
+            int nb_relay = rte_eth_rx_burst(p, 0, pkts, PACKET_BURST);
+            if (nb_relay > 0) {
+                uint16_t sent = rte_eth_tx_burst(p, 0, pkts, nb_relay);
+                /* Free any unsent packets */
+                for (uint16_t u = sent; u < nb_relay; u++)
+                    rte_pktmbuf_free(pkts[u]);
+            }
+        }
+
         if (nb_rx == 0) {
-            /* No packets, brief pause to avoid busy-spin burning CPU */
-            usleep(10);
-            continue;
+            /* Brief pause only when no MISS packets (relay is always fast) */
         }
 
-        atomic_fetch_add(&ctx->metrics->rx_bursts, 1);
-
-        for (int i = 0; i < nb_rx; i++) {
-            ct_offload_process_packet(ctx, pkts[i], 0);
-        }
-
-        /* Process any pending CT entries */
-        doca_flow_ct_entries_process(ctx->flow_ctx->switch_port,
+        /* Process any pending CT entries on port 0 (switch port) */
+        doca_flow_ct_entries_process(ctx->flow_ctx->ports[0],
                                      CT_QUEUE, 0, 0, NULL);
     }
 

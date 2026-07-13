@@ -1,83 +1,91 @@
-// API endpoints for the three services
-const TRAFFIC_GEN_BASE = 'http://192.168.9.23:5001/api'
-const FIREWALL_BASE = 'http://192.168.0.38:8443/api/v1'
-const RECEIVER_BASE = 'http://192.168.9.23:5002/api'
+/**
+ * API client for the Prism orchestrator.
+ *
+ * All calls go through the orchestrator at http://192.168.9.16:8000/api/
+ * which proxies to the real DPU firewall, traffic generator, and receiver.
+ */
+
+const API_BASE = 'http://192.168.9.16:8000/api'
 const ORCHESTRATOR_WS = 'ws://192.168.9.16:8000/ws/metrics'
-
-// --- Traffic Generator Types ---
-
-export interface TrafficProfile {
-  id: string
-  name: string
-  description?: string
-}
-
-export interface TrafficStats {
-  generating: boolean
-  tx_pps: number
-  tx_bps: number
-  total_packets: number
-  elapsed_sec: number
-  profile?: string
-  rate_mbps?: number
-}
 
 // --- Firewall Types ---
 
 export interface FirewallRule {
   id: string
-  name: string
-  action: 'allow' | 'deny'
-  protocol: string
-  src_port?: number
   dst_port?: number
-  src_ip?: string
+  src_port?: number
   dst_ip?: string
-  enabled: boolean
-  hit_count: number
+  src_ip?: string
+  protocol: string
+  action: string
+  priority: number
+  in_hw?: boolean
+  packets?: number
+  bytes?: number
 }
 
 export interface FirewallMetrics {
-  offload_ratio_pct: number
-  active_sessions: number
-  throughput_pps: number
-  throughput_gbps: number
-  hw_sessions: number
-  sw_sessions: number
-  drops_pps: number
+  packets_forwarded?: number
+  packets_dropped?: number
+  bytes_forwarded?: number
+  bytes_dropped?: number
+  active_rules?: number
+  [key: string]: unknown
 }
 
-export interface FirewallSession {
-  id: string
-  src: string
-  dst: string
-  proto: string
-  state: string
-  offloaded: boolean
-  packets: number
+// --- Traffic Generator Types ---
+
+export interface GeneratorPortStats {
+  port: number
+  attempted: number
+  succeeded: number
+  failed: number
+  bytes_sent: number
+}
+
+export interface GeneratorStats {
+  running: boolean
+  profile: string
+  rate_cps: number
+  aggregate: {
+    total_attempted: number
+    total_succeeded: number
+    total_failed: number
+    total_bytes_sent: number
+    elapsed_s: number
+    connections_per_sec: number
+  }
+  per_port: GeneratorPortStats[]
 }
 
 // --- Receiver Types ---
 
-export interface PortStats {
+export interface ReceiverPortStats {
   port: number
-  rx_pps: number
-  rx_bps: number
-  total_packets: number
-  label?: string
+  protocol: string
+  connections: number
+  packets: number
+  bytes_received: number
+  last_seen_ago_s: number | null
+  active: boolean
 }
 
 export interface ReceiverStats {
-  ports: PortStats[]
-  total_rx_pps: number
-  total_rx_bps: number
+  running: boolean
+  bind_ip: string
+  interface: string
+  elapsed_s: number
+  total_packets: number
+  total_bytes: number
+  total_connections: number
+  ports: ReceiverPortStats[]
 }
 
-// --- Aggregated WebSocket message ---
+// --- WebSocket aggregated snapshot ---
 
 export interface AggregatedMetrics {
-  traffic: TrafficStats
   firewall: FirewallMetrics
+  generator: GeneratorStats
   receiver: ReceiverStats
   timestamp: number
 }
@@ -96,76 +104,62 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json()
 }
 
-// Traffic Generator API
-export const trafficApi = {
-  start(profile: string, rateMbps: number): Promise<void> {
-    return fetchJson(`${TRAFFIC_GEN_BASE}/start`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profile, rate_mbps: rateMbps }),
-    })
-  },
-
-  stop(): Promise<void> {
-    return fetchJson(`${TRAFFIC_GEN_BASE}/stop`, { method: 'POST' })
-  },
-
-  stats(): Promise<TrafficStats> {
-    return fetchJson(`${TRAFFIC_GEN_BASE}/stats`)
-  },
-
-  profiles(): Promise<TrafficProfile[]> {
-    return fetchJson(`${TRAFFIC_GEN_BASE}/profiles`)
-  },
-}
-
-// Firewall Admin API
+// Firewall API (proxied through orchestrator -> DPU)
 export const firewallApi = {
   getRules(): Promise<FirewallRule[]> {
-    return fetchJson(`${FIREWALL_BASE}/firewalls/default/rules`)
+    return fetchJson(`${API_BASE}/firewall/rules`)
   },
 
-  toggleRule(ruleId: string, enabled: boolean): Promise<void> {
-    return fetchJson(`${FIREWALL_BASE}/firewalls/default/rules/${ruleId}`, {
-      method: 'PATCH',
+  addRule(rule: {
+    dst_port?: number
+    protocol?: string
+    action?: string
+    priority?: number
+  }): Promise<FirewallRule> {
+    return fetchJson(`${API_BASE}/firewall/rules`, {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify(rule),
     })
   },
 
-  blockPort(port: number): Promise<void> {
-    return fetchJson(`${FIREWALL_BASE}/firewalls/default/rules`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: `Block Port ${port}`,
-        action: 'deny',
-        protocol: 'tcp',
-        dst_port: port,
-        enabled: true,
-      }),
+  deleteRule(ruleId: string): Promise<unknown> {
+    return fetchJson(`${API_BASE}/firewall/rules/${ruleId}`, {
+      method: 'DELETE',
     })
   },
 
   getMetrics(): Promise<FirewallMetrics> {
-    return fetchJson(`${FIREWALL_BASE}/firewalls/default/metrics`)
-  },
-
-  getSessions(): Promise<FirewallSession[]> {
-    return fetchJson(`${FIREWALL_BASE}/firewalls/default/sessions`)
-  },
-
-  flushSessions(): Promise<void> {
-    return fetchJson(`${FIREWALL_BASE}/firewalls/default/sessions`, {
-      method: 'DELETE',
-    })
+    return fetchJson(`${API_BASE}/firewall/metrics`)
   },
 }
 
-// Receiver API
+// Traffic Generator API (proxied through orchestrator -> HPE ns-inet)
+export const trafficApi = {
+  stats(): Promise<GeneratorStats> {
+    return fetchJson(`${API_BASE}/generator/stats`)
+  },
+
+  start(profile?: string, rate?: number): Promise<unknown> {
+    const body: Record<string, unknown> = {}
+    if (profile) body.profile = profile
+    if (rate) body.rate = rate
+    return fetchJson(`${API_BASE}/generator/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  },
+
+  stop(): Promise<unknown> {
+    return fetchJson(`${API_BASE}/generator/stop`, { method: 'POST' })
+  },
+}
+
+// Receiver API (proxied through orchestrator -> HPE ns-client)
 export const receiverApi = {
   stats(): Promise<ReceiverStats> {
-    return fetchJson(`${RECEIVER_BASE}/stats`)
+    return fetchJson(`${API_BASE}/receiver/stats`)
   },
 }
 
