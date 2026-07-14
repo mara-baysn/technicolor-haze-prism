@@ -4,14 +4,14 @@ export default {
   theme: {
     extend: {
       colors: {
-        void: '#080C18',
-        surface: '#0F1424',
-        border: '#1A2038',
+        void: '#0A0A0A',
+        surface: '#141414',
+        border: '#222222',
         signal: '#F5C518',
         deny: '#E53935',
         allow: '#43A047',
         text: '#E8E6E3',
-        muted: '#6B7085',
+        muted: '#888888',
       },
       fontFamily: {
         mono: ['JetBrains Mono', 'monospace'],
