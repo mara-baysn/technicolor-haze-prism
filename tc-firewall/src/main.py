@@ -107,21 +107,21 @@ class TenantRegistrationRequest(BaseModel):
 # --- Idempotency helpers ---
 
 
-def _compute_rule_signature(request: FirewallRuleRequest) -> str:
+def _compute_rule_signature(tenant_id: str, request: FirewallRuleRequest) -> str:
     """Compute a stable hash from the rule's matching fields.
 
     Two requests with the same (src_ip, dst_ip, src_port, dst_port, protocol,
     action, priority) are considered equivalent tc-flower entries.
     """
-    sig = (
-        f"{request.src_ip or ''}|{request.dst_ip or ''}|"
+    sig_str = (
+        f"{tenant_id}|{request.src_ip or ''}|{request.dst_ip or ''}|"
         f"{request.src_port or ''}|{request.dst_port or ''}|"
         f"{request.protocol.value}|{request.action.value}|{request.priority}"
     )
-    return hashlib.sha256(sig.encode()).hexdigest()[:16]
+    return hashlib.sha256(sig_str.encode()).hexdigest()[:16]
 
 
-def _find_existing_rule(request: FirewallRuleRequest):
+def _find_existing_rule(tenant_id: str, request: FirewallRuleRequest):
     """Check if an equivalent rule already exists.
 
     Returns the existing FirewallRule if found, None otherwise.
@@ -134,7 +134,7 @@ def _find_existing_rule(request: FirewallRuleRequest):
             return rules_db[existing_id]
 
     # Check by rule signature (same port, protocol, action, priority)
-    sig = _compute_rule_signature(request)
+    sig = _compute_rule_signature(tenant_id, request)
     existing_id = _rule_signature_index.get(sig)
     if existing_id and existing_id in rules_db:
         return rules_db[existing_id]
@@ -332,7 +332,7 @@ async def add_rule(request: Request, rule_request: FirewallRuleRequest):
     tenant_id = get_tenant_id(request)
 
     # --- Idempotency check ---
-    existing = _find_existing_rule(rule_request)
+    existing = _find_existing_rule(tenant_id, rule_request)
     if existing:
         logger.info(
             f"Idempotent hit: returning existing rule {existing.id} "
@@ -405,7 +405,7 @@ async def add_rule(request: Request, rule_request: FirewallRuleRequest):
     rules_db[rule.id] = rule
 
     # Update idempotency indexes
-    sig = _compute_rule_signature(rule_request)
+    sig = _compute_rule_signature(tenant_id, rule_request)
     _rule_signature_index[sig] = rule.id
     if rule_request.idempotency_key:
         _idempotency_key_index[rule_request.idempotency_key] = rule.id

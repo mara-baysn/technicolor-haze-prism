@@ -59,7 +59,8 @@ class HAManager:
         else:
             self.role = HAState.ACTIVE
         self.peer_url: Optional[str] = peer_url
-        self.generation: int = 1  # monotonic fencing token
+        self._gen_file: str = "/var/run/prism-firewall/ha_generation"
+        self.generation: int = self._load_generation()  # monotonic fencing token
 
         # Heartbeat configuration
         self.heartbeat_interval_ms: int = heartbeat_interval_ms
@@ -76,6 +77,24 @@ class HAManager:
         self._running: bool = False
         self._flush_callback = None  # Set by main.py to flush tc rules on demotion
 
+    def _persist_generation(self):
+        """Write generation to disk for recovery across restarts."""
+        try:
+            import os
+            os.makedirs(os.path.dirname(self._gen_file), exist_ok=True)
+            with open(self._gen_file, "w") as f:
+                f.write(str(self.generation))
+        except OSError:
+            pass  # Non-fatal: generation starts at 1 on next boot
+
+    def _load_generation(self) -> int:
+        """Load generation from disk, default to 1 if not found."""
+        try:
+            with open(self._gen_file, "r") as f:
+                return int(f.read().strip())
+        except (OSError, ValueError):
+            return 1
+
     @property
     def is_active(self) -> bool:
         """True if this instance is the active (primary) node."""
@@ -86,7 +105,7 @@ class HAManager:
         """Number of missed heartbeat intervals since last peer heartbeat."""
         if self.last_heartbeat_received == 0.0:
             return 0
-        elapsed_ms = (time.time() - self.last_heartbeat_received) * 1000
+        elapsed_ms = (time.monotonic() - self.last_heartbeat_received) * 1000
         interval = self.heartbeat_interval_ms
         if interval <= 0:
             return 0
@@ -97,7 +116,7 @@ class HAManager:
         """True if the peer has sent a heartbeat within the timeout window."""
         if self.last_heartbeat_received == 0.0:
             return False
-        elapsed_ms = (time.time() - self.last_heartbeat_received) * 1000
+        elapsed_ms = (time.monotonic() - self.last_heartbeat_received) * 1000
         return elapsed_ms < self.heartbeat_timeout_ms
 
     def receive_heartbeat(self, peer_generation: int, peer_role: str) -> dict:
@@ -105,7 +124,7 @@ class HAManager:
 
         Returns a dict with the resolution action taken (if any).
         """
-        self.last_heartbeat_received = time.time()
+        self.last_heartbeat_received = time.monotonic()
         self.peer_generation = peer_generation
         self.peer_role = HAState(peer_role)
 
@@ -169,6 +188,7 @@ class HAManager:
         previous_role = self.role
         self.generation += 1
         self.role = HAState.ACTIVE
+        self._persist_generation()
 
         logger.warning(
             f"PROMOTED to ACTIVE: {previous_role.value} -> ACTIVE "
