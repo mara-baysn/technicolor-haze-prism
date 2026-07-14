@@ -37,85 +37,79 @@ export default function TrafficGenPanel() {
   const aggregate = stats?.aggregate
   const perPort = stats?.per_port ?? []
 
+  // Find max attempted for bar scaling
+  const maxAttempted = Math.max(...perPort.map((p) => p.attempted), 1)
+
   return (
     <div className="flex flex-col h-full">
-      <h2 className="text-lg font-semibold text-cyan-400 mb-4 flex items-center gap-2">
-        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-            d="M13 10V3L4 14h7v7l9-11h-7z" />
-        </svg>
-        Traffic Generator
-      </h2>
-
-      {/* Status indicator */}
-      <div className="mb-4 flex items-center gap-2">
-        <span className={`w-3 h-3 rounded-full ${isRunning ? 'bg-green-400 animate-pulse' : 'bg-gray-600'}`} />
-        <span className="text-sm text-gray-300">
-          {isRunning ? 'Generating' : 'Idle'}
-        </span>
-        {stats && (
-          <span className="text-xs text-gray-500 ml-auto">
-            {stats.profile} @ {stats.rate_cps} cps
+      {/* Title */}
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-semibold text-text font-sans uppercase tracking-wide">
+          Traffic Source
+        </h2>
+        <div className="flex items-center gap-1.5">
+          <span className={`w-2 h-2 rounded-full ${isRunning ? 'bg-allow' : 'bg-muted/40'}`} />
+          <span className="text-[10px] font-mono text-muted">
+            {isRunning ? `${stats?.rate_cps ?? 0} cps` : 'idle'}
           </span>
-        )}
+        </div>
       </div>
 
       {/* Aggregate counters */}
-      <div className="bg-gray-800/60 rounded-lg p-4 mb-4">
-        <div className="grid grid-cols-3 gap-3">
-          <div>
-            <div className="text-xs text-gray-400 uppercase tracking-wider">Attempted</div>
-            <div className="text-lg font-mono font-bold text-white">
-              {aggregate?.total_attempted?.toLocaleString() ?? '0'}
-            </div>
-          </div>
-          <div>
-            <div className="text-xs text-gray-400 uppercase tracking-wider">Succeeded</div>
-            <div className="text-lg font-mono font-bold text-green-400">
-              {aggregate?.total_succeeded?.toLocaleString() ?? '0'}
-            </div>
-          </div>
-          <div>
-            <div className="text-xs text-gray-400 uppercase tracking-wider">Failed</div>
-            <div className="text-lg font-mono font-bold text-red-400">
-              {aggregate?.total_failed?.toLocaleString() ?? '0'}
-            </div>
+      <div className="grid grid-cols-3 gap-2 mb-3">
+        <div>
+          <div className="text-[10px] text-muted uppercase tracking-wider font-sans">Attempted</div>
+          <div className="text-base font-mono font-bold tabular-nums text-text">
+            {aggregate?.total_attempted?.toLocaleString() ?? '0'}
           </div>
         </div>
-        {aggregate && (
-          <div className="text-xs text-gray-500 mt-2">
-            {aggregate.connections_per_sec.toFixed(1)} conn/s | {aggregate.elapsed_s.toFixed(0)}s elapsed
+        <div>
+          <div className="text-[10px] text-muted uppercase tracking-wider font-sans">Succeeded</div>
+          <div className="text-base font-mono font-bold tabular-nums text-allow">
+            {aggregate?.total_succeeded?.toLocaleString() ?? '0'}
           </div>
-        )}
+        </div>
+        <div>
+          <div className="text-[10px] text-muted uppercase tracking-wider font-sans">Failed</div>
+          <div className="text-base font-mono font-bold tabular-nums text-deny">
+            {aggregate?.total_failed?.toLocaleString() ?? '0'}
+          </div>
+        </div>
       </div>
 
+      {/* Rate info */}
+      {aggregate && (
+        <div className="text-[10px] text-muted font-mono mb-3 border-b border-border pb-2">
+          {(aggregate.connections_per_sec ?? 0).toFixed(1)} conn/s | {(aggregate.elapsed_s ?? 0).toFixed(0)}s elapsed
+        </div>
+      )}
+
       {/* Per-port breakdown */}
-      <div className="flex-1 overflow-auto mb-4">
-        <div className="text-xs text-gray-400 uppercase tracking-wider mb-2">Per-Port Stats</div>
+      <div className="flex-1 overflow-auto mb-3">
+        <div className="text-[10px] text-muted uppercase tracking-wider mb-1.5 font-sans">
+          Per-Port
+        </div>
         <div className="space-y-1">
           {perPort.map((ps) => {
-            const successRate = ps.attempted > 0 ? (ps.succeeded / ps.attempted * 100) : 0
+            const pct = maxAttempted > 0 ? (ps.attempted / maxAttempted) * 100 : 0
             return (
-              <div key={ps.port} className="flex items-center justify-between bg-gray-800/40 rounded px-3 py-1.5">
-                <span className="text-sm font-mono text-gray-300">:{ps.port}</span>
-                <div className="flex items-center gap-3 text-xs font-mono">
-                  <span className="text-green-400">{ps.succeeded}</span>
-                  <span className="text-gray-500">/</span>
-                  <span className="text-red-400">{ps.failed}</span>
-                  <span className={`px-1.5 py-0.5 rounded ${
-                    successRate === 100 ? 'bg-green-900/40 text-green-300' :
-                    successRate === 0 ? 'bg-red-900/40 text-red-300' :
-                    'bg-yellow-900/40 text-yellow-300'
-                  }`}>
-                    {successRate.toFixed(0)}%
-                  </span>
+              <div key={ps.port} className="flex items-center gap-2">
+                <span className="text-xs font-mono text-muted w-10 text-right shrink-0">:{ps.port}</span>
+                <div className="flex-1 h-3 bg-void rounded-sm overflow-hidden border border-border">
+                  <div
+                    className="h-full bg-signal/70 transition-all duration-300"
+                    style={{ width: `${pct}%` }}
+                  />
                 </div>
+                <span className="text-[10px] font-mono text-muted tabular-nums w-8 text-right">
+                  {pct.toFixed(0)}%
+                </span>
               </div>
             )
           })}
           {perPort.length === 0 && (
-            <div className="text-sm text-gray-500 text-center py-4">
-              Start generator to see per-port stats
+            <div className="text-xs text-muted text-center py-3 font-mono">
+              start to see per-port stats
             </div>
           )}
         </div>
@@ -126,16 +120,16 @@ export default function TrafficGenPanel() {
         <button
           onClick={handleStart}
           disabled={isRunning || loading}
-          className="flex-1 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 disabled:text-gray-500 text-white font-medium py-2 px-4 rounded transition-colors"
+          className="flex-1 border border-signal text-signal text-xs font-bold py-1.5 px-3 rounded-[4px] transition-colors hover:bg-signal/10 disabled:border-muted/30 disabled:text-muted/40"
         >
-          Start
+          START
         </button>
         <button
           onClick={handleStop}
           disabled={!isRunning || loading}
-          className="flex-1 bg-red-600 hover:bg-red-500 disabled:bg-gray-700 disabled:text-gray-500 text-white font-medium py-2 px-4 rounded transition-colors"
+          className="flex-1 border border-deny text-deny text-xs font-bold py-1.5 px-3 rounded-[4px] transition-colors hover:bg-deny/10 disabled:border-muted/30 disabled:text-muted/40"
         >
-          Stop
+          STOP
         </button>
       </div>
     </div>

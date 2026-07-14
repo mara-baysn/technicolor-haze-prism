@@ -255,6 +255,49 @@ class TestBuildFlowerCmd:
         assert "icmp" in cmd
 
 
+class TestRunTcError:
+    def test_tc_error_raised_on_failure(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="Error: Cannot find device"
+        )
+        with pytest.raises(TcError, match="Cannot find device"):
+            from src.tc_manager import _run_tc
+            _run_tc(["filter", "show", "dev", "pf0vf0", "ingress"], check=True)
+
+
+class TestGetLastHandle:
+    def test_returns_empty_on_failure(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="error"
+        )
+        from src.tc_manager import _get_last_handle
+        assert _get_last_handle("pf0vf0", 100) == ""
+
+    def test_returns_empty_on_no_handles(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="no handles here\n", stderr=""
+        )
+        from src.tc_manager import _get_last_handle
+        assert _get_last_handle("pf0vf0", 100) == ""
+
+
+class TestGetStatsError:
+    def test_get_stats_returns_zero_on_failure(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="error"
+        )
+        stats = get_stats("pf0vf0")
+        assert stats == {"packets": 0, "bytes": 0}
+
+
+class TestCheckInHwFailure:
+    def test_check_in_hw_returns_false_on_failure(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="error"
+        )
+        assert check_in_hw("pf0vf0", "0x1", 100) is False
+
+
 class TestParseOutput:
     def test_multiple_rules(self):
         output = """filter protocol ip pref 100 flower chain 0 handle 0x1
@@ -275,3 +318,50 @@ filter protocol ip pref 200 flower chain 0 handle 0x2
         assert rules[1].handle == "0x2"
         assert rules[1].action == "drop"
         assert rules[1].in_hw is False
+
+    def test_rule_with_ports(self):
+        output = """filter protocol ip pref 100 flower chain 0 handle 0x1
+  src_ip 10.0.0.1
+  dst_ip 10.0.0.2
+  src_port 12345
+  dst_port 80
+  ip_proto tcp
+  in_hw in_hw_count 1
+    action order 1: mirred (Egress Redirect to device pf0vf3) stolen
+    Sent 500 bytes 5 pkt
+"""
+        rules = _parse_tc_filter_output(output)
+        assert len(rules) == 1
+        assert rules[0].match_sport == 12345
+        assert rules[0].match_dport == 80
+
+    def test_not_in_hw_line(self):
+        output = """filter protocol ip pref 100 flower chain 0 handle 0x1
+  src_ip 10.0.0.1
+  not_in_hw
+    action order 1:  drop
+    Sent 0 bytes 0 pkt
+"""
+        rules = _parse_tc_filter_output(output)
+        assert len(rules) == 1
+        assert rules[0].in_hw is False
+
+    def test_empty_output(self):
+        rules = _parse_tc_filter_output("")
+        assert rules == []
+
+    def test_no_filter_lines(self):
+        output = "some random text\nno filters here\n"
+        rules = _parse_tc_filter_output(output)
+        assert rules == []
+
+    def test_drop_action_not_confused_with_dropped(self):
+        """'dropped' in stats line should not be mistaken for drop action."""
+        output = """filter protocol ip pref 100 flower chain 0 handle 0x1
+  src_ip 10.0.0.1
+    action order 1: mirred (Egress Redirect to device pf0vf3) stolen
+    Sent 500 bytes 5 pkt (dropped 0, overlimits 0 requeues 0)
+"""
+        rules = _parse_tc_filter_output(output)
+        assert len(rules) == 1
+        assert rules[0].action == "redirect"
