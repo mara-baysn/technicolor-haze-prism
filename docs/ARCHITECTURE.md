@@ -22,44 +22,44 @@ once flows are offloaded.
  INTERNET                     FABRIC              TIER 3 — FIREWALL HOST
  ========                     ======              =======================
 
-                                                  ┌─────────────────────────────────────────────┐
- Public IPs announced                             │  Tier 3 Host (512C, 1TB RAM, 2 BF3 DPUs)    │
- via BGP from Edge Router                         │                                             │
-                                                  │  ┌─────────────┐ ┌─────────────┐ ┌───────┐ │
- ┌──────────────┐                                 │  │ Tenant A VM │ │ Tenant B VM │ │Ten. C │ │
- │ Edge Router  │                                 │  │ 4C, 8GB     │ │ 4C, 8GB     │ │2C,4GB │ │
- │              │                                 │  │ Pub: 1.2.3.4│ │ Pub: 5.6.7.8│ │9.10.  │ │
- │ Announces:   │                                 │  │      1.2.3.5│ │             │ │ 11.12 │ │
- │  1.2.3.4/32  │                                 │  │             │ │             │ │       │ │
- │  1.2.3.5/32  │     ┌─────────────┐            │  │ In(Red) VF  │ │ In(Red) VF  │ │In VF  │ │
- │  5.6.7.8/32  │     │             │            │  │ Out(Grn) VF │ │ Out(Grn) VF │ │Out VF │ │
- │  9.10.11.12  │     │   Clos /    │            │  │ Mgmt(Blu)VF │ │ Mgmt(Blu)VF │ │Mgmt VF│ │
- │              │     │  Fat-Tree   │            │  └──────┬──────┘ └──────┬──────┘ └───┬───┘ │
- │  Routes to   │     │   Fabric    │            │         │3 VFs          │3 VFs       │3 VFs│
- │  Tier 3 VTEP │────▶│  (400G      │───────────▶│  ═══════╪══════════════╪════════════╪═════ │
- │              │     │   Leaf/     │            │  ┌──────┴──────────────┴────────────┴───┐  │
- └──────────────┘     │   Spine)    │            │  │         BF3 DPU #1 eSwitch           │  │
-                      │             │            │  │                                      │  │
- TENANT PRIVATE NETS  │             │            │  │  Session Table (shared, 2-16M):      │  │
- ==================   │             │            │  │    (1.2.3.4, tcp, :443→X) → FWD A    │  │
-                      │             │            │  │    (5.6.7.8, tcp, :80→Y)  → FWD B    │  │
- ┌──────────────┐     │             │            │  │    (9.10.11.12, tcp, :22→Z) → DROP   │  │
- │ Tenant A VMs │     │             │            │  │                                      │  │
- │ (Tier 1)     │────▶│             │            │  │  Offload Daemon (ARM):               │  │
- │ 10.0.0.0/16  │     │             │            │  │    gRPC server for ALL tenant VMs    │  │
- └──────────────┘     │             │            │  │    Programs shared session table      │  │
-                      │             │            │  └──────────────────────────────────────┘  │
- ┌──────────────┐     │             │            │                                           │
- │ Tenant B VMs │────▶│             │            │  Also on this host:                       │
- │ (Tier 1)     │     │             │            │   - NAT Gateway (separate)                │
- │ 10.0.0.0/16  │     │             │            │   - Load Balancer (separate DPU)          │
- └──────────────┘     │             │            │   - DNS/DHCP Anchors                      │
-                      │             │            │   - Nexus (separate DPU)                   │
- ┌──────────────┐     │             │            └───────────────────────────────────────────┘
- │ Tenant C VMs │────▶│             │
- │ (Tier 1)     │     └─────────────┘
- │ 172.16.0.0/12│
- └──────────────┘
+                                                  +---------------------------------------------+
+ Public IPs announced                             |  Tier 3 Host (512C, 1TB RAM, 2 BF3 DPUs)    |
+ via BGP from Edge Router                         |                                             |
+                                                  |  +-------------+ +-------------+ +-------+ |
+ +--------------+                                 |  | Tenant A VM | | Tenant B VM | |Ten. C | |
+ | Edge Router  |                                 |  | 4C, 8GB     | | 4C, 8GB     | |2C,4GB | |
+ |              |                                 |  | Pub: 1.2.3.4| | Pub: 5.6.7.8| |9.10.  | |
+ | Announces:   |                                 |  |      1.2.3.5| |             | | 11.12 | |
+ |  1.2.3.4/32  |                                 |  |             | |             | |       | |
+ |  1.2.3.5/32  |     +-------------+            |  | In(Red) VF  | | In(Red) VF  | |In VF  | |
+ |  5.6.7.8/32  |     |             |            |  | Out(Grn) VF | | Out(Grn) VF | |Out VF | |
+ |  9.10.11.12  |     |   Clos /    |            |  | Mgmt(Blu)VF | | Mgmt(Blu)VF | |Mgmt VF| |
+ |              |     |  Fat-Tree   |            |  +------+------+ +------+------+ +---+---+ |
+ |  Routes to   |     |   Fabric    |            |         |3 VFs          |3 VFs       |3 VFs|
+ |  Tier 3 VTEP |---->|  (400G      |----------->|  =======+==============+============+===== |
+ |              |     |   Leaf/     |            |  +------+--------------+------------+---+  |
+ +--------------+     |   Spine)    |            |  |         BF3 DPU #1 eSwitch           |  |
+                      |             |            |  |                                      |  |
+ TENANT PRIVATE NETS  |             |            |  |  Session Table (shared, 2-16M):      |  |
+ ==================   |             |            |  |    (1.2.3.4, tcp, :443->X) -> FWD A  |  |
+                      |             |            |  |    (5.6.7.8, tcp, :80->Y)  -> FWD B  |  |
+ +--------------+     |             |            |  |    (9.10.11.12, tcp, :22->Z) -> DROP |  |
+ | Tenant A VMs |     |             |            |  |                                      |  |
+ | (Tier 1)     |---->|             |            |  |  Offload Daemon (ARM):               |  |
+ | 10.0.0.0/16  |     |             |            |  |    gRPC server for ALL tenant VMs    |  |
+ +--------------+     |             |            |  |    Programs shared session table      |  |
+                      |             |            |  +--------------------------------------+  |
+ +--------------+     |             |            |                                           |
+ | Tenant B VMs |---->|             |            |  Also on this host:                       |
+ | (Tier 1)     |     |             |            |   - NAT Gateway (separate)                |
+ | 10.0.0.0/16  |     |             |            |   - Load Balancer (separate DPU)          |
+ +--------------+     |             |            |   - DNS/DHCP Anchors                      |
+                      |             |            |   - Nexus (separate DPU)                   |
+ +--------------+     |             |            +-------------------------------------------+
+ | Tenant C VMs |---->|             |
+ | (Tier 1)     |     +-------------+
+ | 172.16.0.0/12|
+ +--------------+
 
  Legend:
    Each tenant VM owns its public IPs — binds them on In (Red) VF
@@ -76,74 +76,74 @@ Detailed view of one Tier 3 host running multiple per-tenant Prism VMs, showing
 PCIe topology, VF triplet mapping, and the shared DPU offload daemon.
 
 ```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                      TIER 3 HOST (2-socket, 512 cores, 1TB RAM)                         │
-│                                                                                         │
-│  NUMA Node 0                                                                            │
-│  ┌────────────────────────────────────────────────────────────────────────────────────┐ │
-│  │                                                                                    │ │
-│  │  ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐     │ │
-│  │  │  Tenant A FW VM      │  │  Tenant B FW VM      │  │  Tenant C FW VM      │     │ │
-│  │  │  (QEMU/CH, 4 cores)  │  │  (QEMU/CH, 4 cores)  │  │  (QEMU/CH, 2 cores)  │     │ │
-│  │  │                      │  │                      │  │                      │     │ │
-│  │  │  ┌────┐ ┌───┐ ┌───┐ │  │  ┌────┐ ┌───┐ ┌───┐ │  │  ┌────┐ ┌───┐ ┌───┐ │     │ │
-│  │  │  │Mgmt│ │ In│ │Out│ │  │  │Mgmt│ │ In│ │Out│ │  │  │Mgmt│ │ In│ │Out│ │     │ │
-│  │  │  │Blue│ │Red│ │Grn│ │  │  │Blue│ │Red│ │Grn│ │  │  │Blue│ │Red│ │Grn│ │     │ │
-│  │  │  └──┬─┘ └─┬─┘ └─┬─┘ │  │  └──┬─┘ └─┬─┘ └─┬─┘ │  │  └──┬─┘ └─┬─┘ └─┬─┘ │     │ │
-│  │  │     │     │     │   │  │     │     │     │   │  │     │     │     │   │     │ │
-│  │  │  ┌──┴─────┴─────┴─┐ │  │  ┌──┴─────┴─────┴─┐ │  │  ┌──┴─────┴─────┴─┐ │     │ │
-│  │  │  │ DPDK PMD       │ │  │  │ DPDK PMD       │ │  │  │ DPDK PMD       │ │     │ │
-│  │  │  │ (poll-mode)    │ │  │  │ (poll-mode)    │ │  │  │ (poll-mode)    │ │     │ │
-│  │  │  └───────┬────────┘ │  │  └───────┬────────┘ │  │  └───────┬────────┘ │     │ │
-│  │  │          │           │  │          │           │  │          │           │     │ │
-│  │  │  ┌───────┴────────┐ │  │  ┌───────┴────────┐ │  │  ┌───────┴────────┐ │     │ │
-│  │  │  │ Conntrack→ACL  │ │  │  │ Conntrack→ACL  │ │  │  │ Conntrack→ACL  │ │     │ │
-│  │  │  │ → Verdict      │ │  │  │ → Verdict      │ │  │  │ → Verdict      │ │     │ │
-│  │  │  └────────────────┘ │  │  └────────────────┘ │  │  └────────────────┘ │     │ │
-│  │  │  Pub: 1.2.3.4/.5   │  │  Pub: 5.6.7.8       │  │  Pub: 9.10.11.12    │     │ │
-│  │  └───────────┬─────────┘  └───────────┬─────────┘  └───────────┬─────────┘     │ │
-│  │              │ VF0,VF1,VF2            │ VF3,VF4,VF5            │ VF6,VF7,VF8   │ │
-│  │              │ PCIe VFIO              │ PCIe VFIO              │ PCIe VFIO     │ │
-│  │  ┌───────────┴────────────────────────┴────────────────────────┴─────────────┐ │ │
-│  │  │                      BlueField-3 DPU (PCIe attached)                       │ │ │
-│  │  │                                                                            │ │ │
-│  │  │  ┌──────────────────────────────────────────────────────────────────────┐  │ │ │
-│  │  │  │                      eSwitch (ASAP2)                                 │  │ │ │
-│  │  │  │                                                                      │  │ │ │
-│  │  │  │  ┌─────────────────────────────────────────────────────────────┐     │  │ │ │
-│  │  │  │  │   Hardware Session Table (2-16M entries, SHARED)            │     │  │ │ │
-│  │  │  │  │                                                             │     │  │ │ │
-│  │  │  │  │   Match: dst_ip + src_ip + dst_port + src_port + proto      │     │  │ │ │
-│  │  │  │  │   Per-tenant entries (keyed on flow, not on VNI):           │     │  │ │ │
-│  │  │  │  │     (1.2.3.4:443←X) → FWD to Tenant A Out VF               │     │  │ │ │
-│  │  │  │  │     (5.6.7.8:80←Y)  → FWD to Tenant B Out VF               │     │  │ │ │
-│  │  │  │  │     (9.10.11.12:22←Z) → DROP                                │     │  │ │ │
-│  │  │  │  └─────────────────────────────────────────────────────────────┘     │  │ │ │
-│  │  │  │                                                                      │  │ │ │
-│  │  │  │  Miss (new flow) → route to correct tenant's In VF by dst IP        │  │ │ │
-│  │  │  │  Hit (offloaded) → bypass that tenant's VM entirely                 │  │ │ │
-│  │  │  └──────────────────────────────────────────────────────────────────────┘  │ │ │
-│  │  │                                                                            │ │ │
-│  │  │  ┌──────────────────────────────┐   ┌───────────────────────────────────┐  │ │ │
-│  │  │  │  ARM A78 Cores (16)         │   │  Uplinks (2x100G)                 │  │ │ │
-│  │  │  │  ┌────────────────────────┐ │   │  ┌────┐    ┌────┐                 │  │ │ │
-│  │  │  │  │ Offload Daemon (gRPC)  │ │   │  │ P0 │    │ P1 │                 │  │ │ │
-│  │  │  │  │ - ONE daemon for ALL   │ │   │  └──┬─┘    └──┬─┘                 │  │ │ │
-│  │  │  │  │   tenant VMs           │ │   │     │          │                   │  │ │ │
-│  │  │  │  │ - receives gRPC from   │ │   │     └────┬─────┘                   │  │ │ │
-│  │  │  │  │   each VM's pipeline   │ │   │          │ to fabric/edge          │  │ │ │
-│  │  │  │  │ - programs session tbl │ │   └──────────┼─────────────────────────┘  │ │ │
-│  │  │  │  └────────────────────────┘ │              │                            │ │ │
-│  │  │  │  ┌────────────────────────┐ │              │                            │ │ │
-│  │  │  │  │ SDN Agent (overlay)    │ │              │                            │ │ │
-│  │  │  │  └────────────────────────┘ │              │                            │ │ │
-│  │  │  └──────────────────────────────┘              │                            │ │ │
-│  │  └────────────────────────────────────────────────┼────────────────────────────┘ │ │
-│  │                                                   │                              │ │
-│  └───────────────────────────────────────────────────┼──────────────────────────────┘ │
-│                                                      │                                │
-│                                                      ▼ To Clos Fabric / Edge Router   │
-└────────────────────────────────────────────────────────────────────────────────────────┘
++----------------------------------------------------------------------------------------+
+|                      TIER 3 HOST (2-socket, 512 cores, 1TB RAM)                         |
+|                                                                                         |
+|  NUMA Node 0                                                                            |
+|  +------------------------------------------------------------------------------------+ |
+|  |                                                                                    | |
+|  |  +----------------------+  +----------------------+  +----------------------+     | |
+|  |  |  Tenant A FW VM      |  |  Tenant B FW VM      |  |  Tenant C FW VM      |     | |
+|  |  |  (QEMU/CH, 4 cores)  |  |  (QEMU/CH, 4 cores)  |  |  (QEMU/CH, 2 cores)  |     | |
+|  |  |                      |  |                      |  |                      |     | |
+|  |  |  +----+ +---+ +---+ |  |  +----+ +---+ +---+ |  |  +----+ +---+ +---+ |     | |
+|  |  |  |Mgmt| | In| |Out| |  |  |Mgmt| | In| |Out| |  |  |Mgmt| | In| |Out| |     | |
+|  |  |  |Blue| |Red| |Grn| |  |  |Blue| |Red| |Grn| |  |  |Blue| |Red| |Grn| |     | |
+|  |  |  +--+-+ +-+-+ +-+-+ |  |  +--+-+ +-+-+ +-+-+ |  |  +--+-+ +-+-+ +-+-+ |     | |
+|  |  |     |     |     |   |  |     |     |     |   |  |     |     |     |   |     | |
+|  |  |  +--+-----+-----+-+ |  |  +--+-----+-----+-+ |  |  +--+-----+-----+-+ |     | |
+|  |  |  | DPDK PMD       | |  |  | DPDK PMD       | |  |  | DPDK PMD       | |     | |
+|  |  |  | (poll-mode)    | |  |  | (poll-mode)    | |  |  | (poll-mode)    | |     | |
+|  |  |  +-------+--------+ |  |  +-------+--------+ |  |  +-------+--------+ |     | |
+|  |  |          |           |  |          |           |  |          |           |     | |
+|  |  |  +-------+--------+ |  |  +-------+--------+ |  |  +-------+--------+ |     | |
+|  |  |  | Conntrack->ACL | |  |  | Conntrack->ACL | |  |  | Conntrack->ACL | |     | |
+|  |  |  | -> Verdict     | |  |  | -> Verdict     | |  |  | -> Verdict     | |     | |
+|  |  |  +----------------+ |  |  +----------------+ |  |  +----------------+ |     | |
+|  |  |  Pub: 1.2.3.4/.5   |  |  Pub: 5.6.7.8       |  |  Pub: 9.10.11.12    |     | |
+|  |  +-----------+---------+  +-----------+---------+  +-----------+---------+     | |
+|  |              | VF0,VF1,VF2            | VF3,VF4,VF5            | VF6,VF7,VF8   | |
+|  |              | PCIe VFIO              | PCIe VFIO              | PCIe VFIO     | |
+|  |  +-----------+------------------------+------------------------+-------------+ | |
+|  |  |                      BlueField-3 DPU (PCIe attached)                       | | |
+|  |  |                                                                            | | |
+|  |  |  +----------------------------------------------------------------------+  | | |
+|  |  |  |                      eSwitch (ASAP2)                                 |  | | |
+|  |  |  |                                                                      |  | | |
+|  |  |  |  +-------------------------------------------------------------+     |  | | |
+|  |  |  |  |   Hardware Session Table (2-16M entries, SHARED)            |     |  | | |
+|  |  |  |  |                                                             |     |  | | |
+|  |  |  |  |   Match: dst_ip + src_ip + dst_port + src_port + proto      |     |  | | |
+|  |  |  |  |   Per-tenant entries (keyed on flow, not on VNI):           |     |  | | |
+|  |  |  |  |     (1.2.3.4:443<-X) -> FWD to Tenant A Out VF              |     |  | | |
+|  |  |  |  |     (5.6.7.8:80<-Y)  -> FWD to Tenant B Out VF              |     |  | | |
+|  |  |  |  |     (9.10.11.12:22<-Z) -> DROP                              |     |  | | |
+|  |  |  |  +-------------------------------------------------------------+     |  | | |
+|  |  |  |                                                                      |  | | |
+|  |  |  |  Miss (new flow) -> route to correct tenant's In VF by dst IP        |  | | |
+|  |  |  |  Hit (offloaded) -> bypass that tenant's VM entirely                 |  | | |
+|  |  |  +----------------------------------------------------------------------+  | | |
+|  |  |                                                                            | | |
+|  |  |  +------------------------------+   +-----------------------------------+  | | |
+|  |  |  |  ARM A78 Cores (16)         |   |  Uplinks (2x100G)                 |  | | |
+|  |  |  |  +------------------------+ |   |  +----+    +----+                 |  | | |
+|  |  |  |  | Offload Daemon (gRPC)  | |   |  | P0 |    | P1 |                 |  | | |
+|  |  |  |  | - ONE daemon for ALL   | |   |  +--+-+    +--+-+                 |  | | |
+|  |  |  |  |   tenant VMs           | |   |     |          |                   |  | | |
+|  |  |  |  | - receives gRPC from   | |   |     +----+-----+                   |  | | |
+|  |  |  |  |   each VM's pipeline   | |   |          | to fabric/edge          |  | | |
+|  |  |  |  | - programs session tbl | |   +----------+-------------------------+  | | |
+|  |  |  |  +------------------------+ |              |                            | | |
+|  |  |  |  +------------------------+ |              |                            | | |
+|  |  |  |  | SDN Agent (overlay)    | |              |                            | | |
+|  |  |  |  +------------------------+ |              |                            | | |
+|  |  |  +------------------------------+              |                            | | |
+|  |  +------------------------------------------------+----------------------------+ | |
+|  |                                                   |                              | |
+|  +---------------------------------------------------+------------------------------+ |
+|                                                      |                                |
+|                                                      v To Clos Fabric / Edge Router   |
++----------------------------------------------------------------------------------------+
 ```
 
 ---
@@ -325,7 +325,7 @@ flowchart TD
 
 ```
  ISOLATION LAYER           MECHANISM                      STRENGTH
- ═══════════════════════════════════════════════════════════════════════════
+ ===========================================================================
  1. Process Isolation      Each tenant = separate VM      Hardware — QEMU/CH
                            Own kernel, own memory space    process boundary;
                            No shared state with others     one tenant crash
@@ -413,7 +413,7 @@ flowchart LR
 
 ```
  ASPECT              POC (proven)                PRODUCTION (target)           GAP
- ═══════════════════════════════════════════════════════════════════════════════════════════
+ ===========================================================================================
  Offload API         tc-flower (kernel TC)       DOCA Flow CT (userspace)      Replace stack
  Conntrack           None (stateless)            Per-VM DOCA CT + SW CT        New component
  Decision engine     tc rules on DPU             Per-tenant DPDK VM (2-4C)     N VMs, not 1
@@ -556,7 +556,7 @@ sequenceDiagram
 
 ```
  METRIC                              SCOPE           ALERT CONDITION          ACTION
- ═══════════════════════════════════════════════════════════════════════════════════════════
+ ===========================================================================================
  flow_table_utilization_percent      Per-DPU         > 80% warn, > 95% crit  Redistribute tenants
  tenant_session_count                Per-tenant      > quota warn             Notify tenant
  offload_hit_rate_percent            Per-tenant      < 50% warn              Investigate churn
@@ -567,9 +567,9 @@ sequenceDiagram
  vf_utilization                      Per-DPU         > 240/250 warn          Near VF limit
 
  Export paths:
-   Each Tenant VM ──[OTLP/Blue]──▶ OTel Collector ──▶ Prometheus ──▶ Grafana
-   Shared Daemon  ──[gNMI/Blue]──▶ OTel Collector ──▶ Prometheus ──▶ Grafana
-   herd-handler   ──[OTLP/Blue]──▶ OTel Collector ──▶ Prometheus ──▶ Grafana
+   Each Tenant VM --[OTLP/Blue]--> OTel Collector --> Prometheus --> Grafana
+   Shared Daemon  --[gNMI/Blue]--> OTel Collector --> Prometheus --> Grafana
+   herd-handler   --[OTLP/Blue]--> OTel Collector --> Prometheus --> Grafana
 ```
 
 ---
@@ -590,7 +590,7 @@ sequenceDiagram
 
 ```
  DPU VF Index    Tenant    Interface    Purpose
- ════════════════════════════════════════════════════════════════
+ ================================================================
  VF0             Tenant 1  In (Red)     Internet-facing, binds public IP
  VF1             Tenant 1  Out (Green)  Tenant private network overlay
  VF2             Tenant 1  Mgmt (Blue)  Admin API, telemetry, sync
@@ -656,43 +656,43 @@ For premium tenants (paying for HA SLA), deploy an active-standby pair:
 
 ```
 NORMAL OPERATION:
-  ┌─────────────────────────────────────────────────────────────────┐
-  │                                                                 │
-  │  Host-A                          Host-B                         │
-  │  ┌─────────────────────┐         ┌─────────────────────┐       │
-  │  │ Tenant-X FW VM      │         │ Tenant-X FW VM      │       │
-  │  │ (ACTIVE)            │         │ (STANDBY)           │       │
-  │  │                     │         │                     │       │
-  │  │ Public IP: 1.2.3.4  │         │ (ready, no traffic) │       │
-  │  │ Processing traffic   │────────▶│ Session replication  │       │
-  │  │                     │ sync    │ (receives CT state)  │       │
-  │  └─────────────────────┘         └─────────────────────┘       │
-  │         ▲                                                       │
-  │         │ traffic                                               │
-  │         │                                                       │
-  └─────────┼───────────────────────────────────────────────────────┘
-            │
-      Edge Router (BGP: 1.2.3.4 → Host-A DPU)
+  +-----------------------------------------------------------------+
+  |                                                                 |
+  |  Host-A                          Host-B                         |
+  |  +---------------------+         +---------------------+       |
+  |  | Tenant-X FW VM      |         | Tenant-X FW VM      |       |
+  |  | (ACTIVE)            |         | (STANDBY)           |       |
+  |  |                     |         |                     |       |
+  |  | Public IP: 1.2.3.4  |         | (ready, no traffic) |       |
+  |  | Processing traffic   |-------->| Session replication  |       |
+  |  |                     | sync    | (receives CT state)  |       |
+  |  +---------------------+         +---------------------+       |
+  |         ^                                                       |
+  |         | traffic                                               |
+  |         |                                                       |
+  +---------+-------------------------------------------------------+
+            |
+      Edge Router (BGP: 1.2.3.4 -> Host-A DPU)
 ```
 
 ```
 FAILOVER (Host-A dies):
-  ┌─────────────────────────────────────────────────────────────────┐
-  │                                                                 │
-  │  Host-A (DEAD)                   Host-B                         │
-  │  ┌─────────────────────┐         ┌─────────────────────┐       │
-  │  │        ████████████ │         │ Tenant-X FW VM      │       │
-  │  │        ██ FAILED ██ │         │ (NOW ACTIVE)        │       │
-  │  │        ████████████ │         │                     │       │
-  │  │                     │         │ Public IP: 1.2.3.4  │       │
-  │  │                     │         │ Session table: warm  │       │
-  │  │                     │         │ (replicated state)   │       │
-  │  └─────────────────────┘         └─────────────────────┘       │
-  │                                          ▲                      │
-  │                                          │ traffic              │
-  └──────────────────────────────────────────┼──────────────────────┘
-                                             │
-      Edge Router (BGP: 1.2.3.4 → Host-B DPU now)
+  +-----------------------------------------------------------------+
+  |                                                                 |
+  |  Host-A (DEAD)                   Host-B                         |
+  |  +---------------------+         +---------------------+       |
+  |  |        ████████████ |         | Tenant-X FW VM      |       |
+  |  |        ██ FAILED ██ |         | (NOW ACTIVE)        |       |
+  |  |        ████████████ |         |                     |       |
+  |  |                     |         | Public IP: 1.2.3.4  |       |
+  |  |                     |         | Session table: warm  |       |
+  |  |                     |         | (replicated state)   |       |
+  |  +---------------------+         +---------------------+       |
+  |                                          ^                      |
+  |                                          | traffic              |
+  +------------------------------------------+----------------------+
+                                             |
+      Edge Router (BGP: 1.2.3.4 -> Host-B DPU now)
 ```
 
 #### Active-Standby Components:
@@ -770,37 +770,37 @@ sequenceDiagram
 ## 11. Orchestration — Who Manages All This?
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    CONTROL PLANE                                  │
-│                                                                  │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐   │
-│  │ Tenant API  │  │ herd-manager │  │  DPU Orchestrator     │   │
-│  │ (user-facing)│  │ (VM lifecycle)│  │  (eSwitch steering)  │   │
-│  └──────┬──────┘  └──────┬───────┘  └──────────┬───────────┘   │
-│         │                 │                      │               │
-│         │  "Create FW     │  "Boot VM on        │  "Steer pub   │
-│         │   for tenant"   │   Host-A with       │   IP to VF    │
-│         │                 │   3 VFs + pub IP"   │   on DPU-X"   │
-│         ▼                 ▼                      ▼               │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │              Temporal Workflow Engine                       │   │
-│  │  (orchestrates multi-step provisioning with retries)       │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-         │                    │                      │
-         ▼                    ▼                      ▼
-    ┌──────────┐       ┌───────────┐         ┌───────────────┐
-    │ Prism    │       │ herd-     │         │ DPU Agent     │
-    │ Admin API│       │ handler   │         │ (per DPU)     │
-    │ (per VM) │       │ (per host)│         │               │
-    │ :8443    │       │           │         │ Programs      │
-    │ Blue VF  │       │ Boot VM,  │         │ eSwitch +     │
-    │          │       │ attach 3  │         │ session table │
-    │ Each     │       │ VFs per   │         │               │
-    │ tenant   │       │ tenant,   │         │ Shared offload│
-    │ has own  │       │ assign    │         │ daemon runs   │
-    │ API      │       │ pub IPs   │         │ here          │
-    └──────────┘       └───────────┘         └───────────────┘
++-----------------------------------------------------------------+
+|                    CONTROL PLANE                                  |
+|                                                                  |
+|  +-------------+  +--------------+  +----------------------+   |
+|  | Tenant API  |  | herd-manager |  |  DPU Orchestrator     |   |
+|  | (user-facing)|  | (VM lifecycle)|  |  (eSwitch steering)  |   |
+|  +------+------+  +------+-------+  +----------+-----------+   |
+|         |                 |                      |               |
+|         |  "Create FW     |  "Boot VM on        |  "Steer pub   |
+|         |   for tenant"   |   Host-A with       |   IP to VF    |
+|         |                 |   3 VFs + pub IP"   |   on DPU-X"   |
+|         v                 v                      v               |
+|  +----------------------------------------------------------+   |
+|  |              Temporal Workflow Engine                       |   |
+|  |  (orchestrates multi-step provisioning with retries)       |   |
+|  +----------------------------------------------------------+   |
++-----------------------------------------------------------------+
+         |                    |                      |
+         v                    v                      v
+    +----------+       +-----------+         +---------------+
+    | Prism    |       | herd-     |         | DPU Agent     |
+    | Admin API|       | handler   |         | (per DPU)     |
+    | (per VM) |       | (per host)|         |               |
+    | :8443    |       |           |         | Programs      |
+    | Blue VF  |       | Boot VM,  |         | eSwitch +     |
+    |          |       | attach 3  |         | session table |
+    | Each     |       | VFs per   |         |               |
+    | tenant   |       | tenant,   |         | Shared offload|
+    | has own  |       | assign    |         | daemon runs   |
+    | API      |       | pub IPs   |         | here          |
+    +----------+       +-----------+         +---------------+
 ```
 
 ### Provisioning Workflow (New Tenant)
@@ -811,7 +811,7 @@ sequenceDiagram
    a. Select host with available capacity (VFs, cores, RAM)
    b. Reserve 3 VFs on target DPU
    c. Tell herd-handler: boot VM with (4 cores, 8GB, VF triplet, pub IPs)
-   d. Tell DPU Orchestrator: steer 1.2.3.4 → In VF on this DPU
+   d. Tell DPU Orchestrator: steer 1.2.3.4 -> In VF on this DPU
    e. Tell Edge Router: announce 1.2.3.4/32 via BGP (next-hop = Tier 3 VTEP)
    f. Wait for VM health check (DPDK up, daemon connected, policy loaded)
    g. Mark tenant firewall as ACTIVE
