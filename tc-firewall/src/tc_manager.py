@@ -19,10 +19,15 @@ For DENY rules: drop action on matched traffic
 import subprocess
 import re
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Lock protecting handle allocation: tc add + get_last_handle must be atomic
+# to prevent concurrent rule creation from corrupting the handle map.
+_tc_lock = threading.Lock()
 
 # Port mapping
 INTERNET_PORT = "pf0vf0"
@@ -181,11 +186,11 @@ def _add_redirect_rule(
     )
     cmd += ["action", "mirred", "egress", "redirect", "dev", target]
 
-    _run_tc(cmd)
-    logger.info(f"Added redirect rule on {dev} → {target} (prio {priority})")
-
-    # Get the handle of the just-added rule
-    handle = _get_last_handle(dev, priority)
+    with _tc_lock:
+        _run_tc(cmd)
+        logger.info(f"Added redirect rule on {dev} → {target} (prio {priority})")
+        # Get the handle of the just-added rule — must be atomic with add
+        handle = _get_last_handle(dev, priority)
     return handle
 
 
@@ -210,10 +215,11 @@ def _add_drop_rule(
     )
     cmd += ["action", "drop"]
 
-    _run_tc(cmd)
-    logger.info(f"Added drop rule on {dev} (prio {priority})")
-
-    handle = _get_last_handle(dev, priority)
+    with _tc_lock:
+        _run_tc(cmd)
+        logger.info(f"Added drop rule on {dev} (prio {priority})")
+        # Get the handle of the just-added rule — must be atomic with add
+        handle = _get_last_handle(dev, priority)
     return handle
 
 
@@ -269,11 +275,12 @@ def remove_rule(dev: str, handle: str, priority: int) -> None:
         logger.warning(f"No handle to remove on {dev}")
         return
 
-    _run_tc([
-        "filter", "del", "dev", dev, "ingress",
-        "prio", str(priority), "handle", handle, "flower",
-    ])
-    logger.info(f"Removed rule {handle} from {dev} prio {priority}")
+    with _tc_lock:
+        _run_tc([
+            "filter", "del", "dev", dev, "ingress",
+            "prio", str(priority), "handle", handle, "flower",
+        ])
+        logger.info(f"Removed rule {handle} from {dev} prio {priority}")
 
 
 def flush_rules(port: str) -> None:
