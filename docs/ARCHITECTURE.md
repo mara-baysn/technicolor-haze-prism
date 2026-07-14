@@ -51,7 +51,6 @@ once flows are offloaded.
                       |             |            |  +--------------------------------------+   |
  +--------------+     |             |            |                                             |
  | Tenant B VMs |---->|             |            |  Also on this host:                         |
- | (Tier 1)     |     |             |            |   - NAT Gateway (separate)                  |
  | 10.0.0.0/16  |     |             |            |   - Load Balancer (separate DPU)            |
  +--------------+     |             |            |   - DNS/DHCP Anchors                        |
                       |             |            |   - Nexus (separate DPU)                    |
