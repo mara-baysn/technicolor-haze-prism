@@ -836,6 +836,49 @@ sequenceDiagram
 
 ## 12. Performance Architecture
 
+### Hardware Specifications (Validated)
+
+```
+BF3 B3220L E-Series FHHL SuperNIC
+==================================
+
+NETWORK PORTS:
+  2x QSFP112 (200 Gbps each)
+  Total network line rate: 400 Gbps
+  Supported speeds: 200G_2X, 200G_4X, 100G_1X, 100G_2X, 50G, 25G, 10G, 1G
+  Status: cables not connected in PoC (single-host hairpin test)
+
+PCIe (HOST <-> DPU):
+  Link: PCIe Gen5 x16
+  Raw bandwidth: 32 GT/s x 16 lanes x (128/130 encoding) = 504 Gbps
+  Effective: ~500 Gbps per direction (full duplex)
+  Status: active at full speed (32GT/s x16 confirmed via lspci)
+
+ARM SUBSYSTEM:
+  8x ARM A78 cores, 16 GB DDR
+  Internal PCIe: Gen3 x2 (16 Gbps) — management path only
+  DOCA 3.4, firmware 32.49.1014
+
+BANDWIDTH DIAGRAM:
+                     PCIe Gen5 x16
+                     504 Gbps (full duplex)
+                     |
+  Host VFs  <=======>  BF3 DPU eSwitch  <=======>  2x QSFP112
+  (up to 504 Gbps)    (silicon, line rate)          (400 Gbps total)
+                                                    (200G per port)
+
+PRODUCTION DATA PATH (external traffic):
+  Internet -> QSFP port (200G) -> eSwitch -> PCIe (504G) -> Host VF
+  Bottleneck: NETWORK (400G < PCIe 504G)
+  Per-port max: 200 Gbps
+
+PoC DATA PATH (single-host hairpin, no cables):
+  Host VF0 -> PCIe down -> eSwitch -> PCIe up -> Host VF3
+  Both directions share the same PCIe bus
+  Measured: 148 Gbps (limited by TCP/iperf3 stack, not PCIe)
+  PCIe is full-duplex so theoretical hairpin: ~500 Gbps
+```
+
 ### Latency Budget
 
 ```
@@ -959,6 +1002,9 @@ VM inspection capacity (16 cores DPDK):
 +------------------------------------------------------------------+
 | Bottleneck              | Limit            | Mitigation           |
 |-------------------------|------------------|----------------------|
+| Network line rate       | 400 Gbps (2x200G)  | Scale-out: add DPUs |
+| PCIe bandwidth (host)   | 504 Gbps (Gen5 x16)| Not a bottleneck    |
+| Hairpin (PoC, no cable) | ~148 Gbps measured | TCP stack limited   |
 | DPU line rate           | 400 Gbps (2x200G QSFP112)| Scale-out: add DPUs |
 | Session table entries   | 2-16M per DPU    | Per-tenant quota     |
 | PCIe bandwidth (host)   | ~256 Gbps (Gen5) | NUMA alignment       |
