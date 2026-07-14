@@ -34,11 +34,13 @@ class FirewallRuleRequest(BaseModel):
     action: RuleAction = RuleAction.ALLOW
     priority: int = Field(100, ge=1, le=65535)
     comment: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 class FirewallRule(BaseModel):
     """A firewall rule with its metadata."""
     id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    tenant_id: Optional[str] = None
     src_ip: Optional[str] = None
     dst_ip: Optional[str] = None
     src_port: Optional[int] = None
@@ -87,9 +89,15 @@ class Session(BaseModel):
 
 
 class SNATRule(BaseModel):
-    """Request to create a source NAT rule (egress: private IP -> public IP)."""
+    """Request to create a source NAT rule (egress: private IP -> public IP).
+
+    Modes:
+      - "static": Fixed 1:1 IP mapping (default). No port tracking.
+      - "masquerade": Many-to-one NAT with ephemeral port allocation.
+    """
     private_ip: str
     public_ip: str
+    mode: str = "static"  # "static" or "masquerade"
     comment: Optional[str] = None
 
 
@@ -116,7 +124,9 @@ class PortForwardRule(BaseModel):
 class NATEntry(BaseModel):
     """A NAT rule entry with metadata and statistics."""
     id: str
+    tenant_id: Optional[str] = None
     type: str  # "snat", "dnat", "forward"
+    mode: Optional[str] = None  # "static" or "masquerade" (SNAT only)
     public_ip: str
     public_port: Optional[int] = None
     private_ip: str
@@ -126,3 +136,12 @@ class NATEntry(BaseModel):
     packets: int = 0
     bytes: int = 0
     created_at: float
+
+
+class TenantConfig(BaseModel):
+    """Configuration and quota for a tenant."""
+    tenant_id: str
+    public_ips: list[str] = Field(default_factory=list)
+    max_rules: int = 100
+    max_nat_entries: int = 50
+    created_at: float = Field(default_factory=time.time)

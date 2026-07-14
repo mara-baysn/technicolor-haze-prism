@@ -15,26 +15,30 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.main import app
+from src.main import app, nat_entries_db
 from src.models import NATEntry, SNATRule, DNATRule, PortForwardRule
 from src import nat_manager
 from src import tc_manager
+from src.tenants import tenant_manager
+from tests.conftest import TenantTestClient, DEFAULT_TEST_TENANT
 
 
 @pytest.fixture(autouse=True)
 def clear_nat_db():
     """Clear the NAT database before and after each test."""
     nat_manager.nat_db.clear()
+    nat_entries_db.clear()
     yield
     nat_manager.nat_db.clear()
+    nat_entries_db.clear()
 
 
 @pytest.fixture
 def client():
-    """Create a TestClient with mocked lifespan."""
+    """Create a TestClient with mocked lifespan and default tenant header."""
     with patch("src.tc_manager.ensure_ingress_qdisc"):
         with TestClient(app) as c:
-            yield c
+            yield TenantTestClient(c)
 
 
 class TestSNATManager:
@@ -555,3 +559,84 @@ class TestNATFlushEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["rules_removed"] == 0
+
+
+# --- Idempotency Tests ---
+
+
+class TestNATIdempotency:
+    """Test that duplicate NAT rule creation is idempotent."""
+
+    @pytest.fixture(autouse=True)
+    def clear_nat_signature_index(self):
+        """Clear the NAT signature index before each test."""
+        nat_manager._nat_signature_index.clear()
+        yield
+        nat_manager._nat_signature_index.clear()
+
+    @patch("src.nat_manager.check_in_hw")
+    @patch("src.nat_manager._get_last_handle")
+    @patch("src.nat_manager._run_tc")
+    def test_duplicate_snat_returns_existing(self, mock_run_tc, mock_get_handle, mock_check_hw):
+        """Adding the same SNAT rule twice returns the existing entry."""
+        mock_run_tc.return_value = MagicMock(returncode=0)
+        mock_get_handle.return_value = "0x1"
+        mock_check_hw.return_value = True
+
+        entry1 = nat_manager.add_snat("10.0.1.5", "1.2.3.4")
+        entry2 = nat_manager.add_snat("10.0.1.5", "1.2.3.4")
+
+        # Same entry returned
+        assert entry1.id == entry2.id
+        # tc was only called once
+        assert mock_run_tc.call_count == 1
+        # Only one entry in the DB
+        assert len(nat_manager.nat_db) == 1
+
+    @patch("src.nat_manager.check_in_hw")
+    @patch("src.nat_manager._get_last_handle")
+    @patch("src.nat_manager._run_tc")
+    def test_duplicate_dnat_returns_existing(self, mock_run_tc, mock_get_handle, mock_check_hw):
+        """Adding the same DNAT rule twice returns the existing entry."""
+        mock_run_tc.return_value = MagicMock(returncode=0)
+        mock_get_handle.return_value = "0x2"
+        mock_check_hw.return_value = True
+
+        entry1 = nat_manager.add_dnat("1.2.3.4", 443, "10.0.1.5", 443, "tcp")
+        entry2 = nat_manager.add_dnat("1.2.3.4", 443, "10.0.1.5", 443, "tcp")
+
+        assert entry1.id == entry2.id
+        assert mock_run_tc.call_count == 1
+        assert len(nat_manager.nat_db) == 1
+
+    @patch("src.nat_manager.check_in_hw")
+    @patch("src.nat_manager._get_last_handle")
+    @patch("src.nat_manager._run_tc")
+    def test_duplicate_port_forward_returns_existing(self, mock_run_tc, mock_get_handle, mock_check_hw):
+        """Adding the same port forward rule twice returns the existing entry."""
+        mock_run_tc.return_value = MagicMock(returncode=0)
+        mock_get_handle.return_value = "0x3"
+        mock_check_hw.return_value = False
+
+        entry1 = nat_manager.add_port_forward("1.2.3.4", 8080, "10.0.1.100", 80, "tcp")
+        entry2 = nat_manager.add_port_forward("1.2.3.4", 8080, "10.0.1.100", 80, "tcp")
+
+        assert entry1.id == entry2.id
+        assert mock_run_tc.call_count == 1
+        assert len(nat_manager.nat_db) == 1
+
+    @patch("src.nat_manager.check_in_hw")
+    @patch("src.nat_manager._get_last_handle")
+    @patch("src.nat_manager._run_tc")
+    def test_different_dnat_not_deduplicated(self, mock_run_tc, mock_get_handle, mock_check_hw):
+        """DNAT rules with different ports are created separately."""
+        mock_run_tc.return_value = MagicMock(returncode=0)
+        mock_get_handle.return_value = "0x2"
+        mock_check_hw.return_value = False
+
+        entry1 = nat_manager.add_dnat("1.2.3.4", 80, "10.0.1.5", 80, "tcp")
+        entry2 = nat_manager.add_dnat("1.2.3.4", 443, "10.0.1.5", 443, "tcp")
+
+        assert entry1.id != entry2.id
+        assert len(nat_manager.nat_db) == 2
+        assert mock_run_tc.call_count == 2
