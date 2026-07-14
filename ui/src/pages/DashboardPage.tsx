@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import TrafficGenPanel from '../components/TrafficGenPanel'
 import FirewallPanel from '../components/FirewallPanel'
 import ReceiverPanel from '../components/ReceiverPanel'
+import ArchitectureDiagram from '../components/ArchitectureDiagram'
 import { metricsStream } from '../api/client'
 import type { AggregatedMetrics } from '../api/client'
 
@@ -52,6 +53,9 @@ export default function DashboardPage() {
       <div className="px-5 py-1.5 text-xs text-muted font-mono flex items-center gap-4 shrink-0 border-b border-border">
         <span>Total connections: <span className="text-text">{totalConns.toLocaleString()}</span></span>
       </div>
+
+      {/* Architecture diagram (collapsible) */}
+      <ArchitectureDiagram />
 
       {/* 3-column topology layout */}
       <div className="flex-1 grid grid-cols-3 gap-px px-5 pb-4 pt-3 min-h-0">

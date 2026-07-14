@@ -14,6 +14,10 @@ Anyone on the team should be able to follow this cold with zero assumed knowledg
 5. [Demo Flow (8-10 minutes)](#demo-flow)
 6. [Teardown](#teardown)
 7. [Troubleshooting](#troubleshooting)
+8. [Architecture Explanation (for audience)](#architecture-explanation-for-audience)
+9. [Post-PoC Roadmap](#post-poc-roadmap)
+10. [Q&A Preparation](#qa-preparation)
+11. [TUI Monitor Commands Reference](#tui-monitor-commands-reference)
 
 ---
 
@@ -250,6 +254,12 @@ Pre-connect each terminal:
 ```bash
 # Terminal 1 (Traffic TUI) — leave ready but don't start yet
 ssh -i $SSH_KEY $HPE
+# When ready: sudo ip netns exec ns-inet python3 -m src.tui --profile mixed --rate 20
+
+# Terminal 1-alt (PRISM Monitor TUI — full dashboard view)
+ssh -i $SSH_KEY $HPE
+# When ready: python3 tui/prism_monitor.py --fw-url http://192.168.0.38:8443 \
+#   --gen-url http://localhost:5001 --recv-url http://localhost:5002
 
 # Terminal 2 (CPU monitor)
 ssh -i $SSH_KEY $HPE
@@ -289,6 +299,17 @@ Open `http://192.168.9.16:8000` in the browser. Verify you see:
 ```bash
 # Terminal 1 — SSH to HPE, run in ns-inet namespace
 sudo ip netns exec ns-inet python3 -m src.tui --profile mixed --rate 20
+```
+
+Optionally, start the PRISM Monitor TUI for a full-dashboard view (shows traffic source, firewall state, and receiver simultaneously):
+
+```bash
+# Terminal 1-alt — PRISM Monitor (reference: tui/prism_monitor.py)
+python3 tui/prism_monitor.py \
+  --fw-url http://192.168.0.38:8443 \
+  --gen-url http://localhost:5001 \
+  --recv-url http://localhost:5002 \
+  --interval 0.5
 ```
 
 **What the audience sees:** The TUI shows connections being attempted but ALL failing. Every port shows red "BLOCKED" status. Connection rate is non-zero but success rate is 0%.
@@ -799,4 +820,232 @@ ADD DENY:       curl -X POST localhost:18443/rules -H "Content-Type: application
 DELETE RULE:    curl -X DELETE localhost:18443/rules/RULE_ID
 FLUSH ALL:      curl -X POST localhost:18443/rules/flush
 HEALTH:         curl localhost:18443/health
+
+TUI MONITOR:    python3 tui/prism_monitor.py --fw-url http://192.168.0.38:8443 \
+                  --gen-url http://localhost:5001 --recv-url http://localhost:5002
 ```
+
+---
+
+## Architecture Explanation (for audience)
+
+This section maps the PoC lab interfaces to their production equivalents. Use this to help the audience understand how the demo topology translates to a real multi-tenant deployment.
+
+| PoC Interface | Role in Demo | Production Equivalent |
+|---------------|-------------|----------------------|
+| **VF0** (pf0vf0 / ns-inet) | In interface — traffic enters the firewall here | Green Rail B ingress from tenant DPU |
+| **VF3** (pf0vf3 / ns-client) | Out interface — allowed traffic exits here | Green Rail B / Red egress toward WAN |
+| **REST :8443** | Admin interface — rule CRUD, health, metrics | Blue OOB management plane (mTLS in production) |
+| **tc-flower** | eSwitch hardware offload — rules install to silicon | DOCA Flow CT (connection tracking with full offload) |
+
+### Data Path in Production
+
+```
+Tenant DPU (Green Rail B)
+  │
+  ▼ ingress
+┌──────────────────────────────────┐
+│  BF3 eSwitch (DOCA Flow CT)     │
+│  ┌────────────────────────────┐  │
+│  │ Match → CT lookup → Action │  │
+│  └────────────────────────────┘  │
+└──────────────────────────────────┘
+  │                          │
+  ▼ allow                    ▼ deny
+Green Rail B / Red       drop in silicon
+(toward WAN)             (zero CPU cost)
+```
+
+### Management Plane in Production
+
+```
+Blue OOB Network (out-of-band, no tenant access)
+  │
+  ▼ mTLS
+┌──────────────────────────────────┐
+│  Firewall API (port 8443)        │
+│  - Rule CRUD                     │
+│  - Health / metrics / sessions   │
+│  - Tenant isolation enforcement  │
+└──────────────────────────────────┘
+```
+
+---
+
+## Post-PoC Roadmap
+
+| Phase | Status | Description | Key Metric |
+|-------|--------|-------------|------------|
+| **Phase 1** | Done | tc-flower proof of concept | 148 Gbps, in_hw=true |
+| **Phase 2** | Next | DOCA Flow CT with EGRESS domain fix | True zero-CPU offload (no sobbing ARM cores) |
+| **Phase 3** | Planned | Tier 3 inspection VM with DPDK | First-N-packets deep inspection |
+| **Phase 4** | Planned | Multi-tenant (per-VF rule isolation, tenant API) | 125 tenant pairs per BF3 |
+| **Phase 5** | Planned | Production hardening | mTLS, HA, logging, Prometheus metrics |
+
+### Phase 1: tc-flower Proof of Concept (DONE)
+
+What we demonstrated today:
+- tc-flower rules installed via REST API, offloaded to BF3 eSwitch silicon
+- 148 Gbps throughput measured with iperf3 (4 parallel streams)
+- 0% CPU during forwarding (all in hardware)
+- Sub-millisecond policy updates (add/remove rules)
+- Deny-all default policy (zero trust)
+
+### Phase 2: DOCA Flow CT (EGRESS Domain Fix Required)
+
+The DOCA Flow API provides connection tracking (CT) with full hardware offload. However, we hit an EGRESS domain issue where flows cannot be installed on the egress path via the DOCA API. This has been filed with NVIDIA.
+
+**Why this matters:** tc-flower uses the same underlying BF3 ASIC (the ConnectX-7 eSwitch). DOCA Flow CT adds stateful connection tracking without requiring bidirectional rule pairs — the CT module handles reverse flows automatically.
+
+**Workaround (current):** tc-flower with explicit forward+reverse rule pairs. Same ASIC, same performance, slightly more rules to manage.
+
+### Phase 3: Tier 3 Inspection VM with DPDK
+
+For traffic that requires deep packet inspection (DPI), the first N packets of a new flow are steered to an x86 inspection VM running DPDK on the Tier 3 server (576 cores available). After classification, the flow is either:
+- Allowed: a hardware rule is installed for remaining packets (fast path)
+- Denied: a drop rule is installed in hardware
+
+The inspection VM does NOT run on the DPU ARM cores (8 cores, limited memory). It runs on the x86 compute tier where CPU and memory are abundant.
+
+### Phase 4: Multi-Tenant
+
+Each tenant gets a dedicated VF pair on the BF3. tc-flower rules are scoped per-VF, providing hardware-enforced tenant isolation:
+- 125 VF pairs available per BF3 (250 VFs total / 2 per tenant)
+- Per-tenant rule namespaces via the REST API
+- Tenant cannot see or modify other tenants' rules
+- Rate limiting per-VF via tc-police (also hardware offloaded)
+
+### Phase 5: Production Hardening
+
+- **mTLS** on the management API (Blue OOB plane only)
+- **HA** — active/standby BF3 pair with rule sync
+- **Structured logging** — JSON logs to central collector
+- **Prometheus metrics** — /metrics endpoint in OpenMetrics format
+- **Alerting** — rule install failures, link down, CPU threshold breach
+- **Audit trail** — every rule change logged with timestamp + caller identity
+
+---
+
+## Q&A Preparation
+
+Anticipated questions from the audience with pre-validated answers.
+
+### "Is this really hardware offloaded?"
+
+**Yes. Proof:**
+
+1. `in_hw=true` flag on every rule (visible in `tc filter show` output and API response)
+2. `tc -s filter show` displays "Sent hardware X bytes Y pkt" — these counters increment in silicon without any CPU involvement
+3. CPU is 99.5% idle during 148 Gbps forwarding (shown via `htop` / `top`)
+4. If you remove the eSwitch (`devlink dev eswitch set mode legacy`), throughput drops to ~20 Gbps and CPU saturates — proving the hardware path
+
+```bash
+# Command to verify in_hw flag:
+ssh -i $SSH_KEY $ARM "ssh $DPU 'sudo tc -s filter show dev pf0vf0 ingress'" | grep -A2 "in_hw"
+```
+
+### "Why not use DOCA Flow directly?"
+
+**We tried. There is an EGRESS domain issue.**
+
+The DOCA Flow API cannot currently install flows on the EGRESS domain of the eSwitch. This means you cannot match on egress traffic for bidirectional forwarding via the DOCA API alone. This bug has been filed with NVIDIA and is under investigation.
+
+**Key point:** tc-flower uses the exact same BF3 ASIC (ConnectX-7 eSwitch). The difference is the control plane API, not the data plane hardware. Our PoC achieves the same line-rate offload that DOCA Flow would provide — the only difference is that tc-flower requires explicit forward+reverse rule pairs while DOCA Flow CT would handle reverse flows via connection tracking.
+
+When NVIDIA resolves the EGRESS domain issue, we switch to DOCA Flow CT and get:
+- Automatic reverse flow handling (fewer rules to manage)
+- Native connection tracking in hardware
+- Better integration with DOCA telemetry
+
+### "How does this scale to multiple tenants?"
+
+**Per-VF tc-flower rules provide hardware-enforced isolation.**
+
+- Each BF3 has 250 VFs available
+- Each tenant pair uses 2 VFs (in + out) = **125 tenant pairs per BF3**
+- tc-flower rules are scoped to a specific VF device (e.g., `dev pf0vf0`) — a rule on VF0 cannot affect VF2
+- The eSwitch handles per-VF rule matching in hardware with no cross-VF interference
+- Our REST API will enforce tenant isolation at the API layer (tenant A cannot POST rules to tenant B's VFs)
+
+```bash
+# Example: tenant 1 on VF0/VF3, tenant 2 on VF1/VF4
+sudo tc filter add dev pf0vf0 ingress protocol ip flower ... action mirred egress redirect dev pf0vf3
+sudo tc filter add dev pf0vf1 ingress protocol ip flower ... action mirred egress redirect dev pf0vf4
+```
+
+### "What's the latency?"
+
+**Sub-millisecond measured; sub-microsecond for offloaded flows.**
+
+- Measured with `ping` through the firewall path: **< 0.3ms RTT** (includes namespace overhead, kernel stack on both ends)
+- For offloaded flows (tc-flower in_hw=true), the eSwitch adds ~0.5-1 microsecond per hop — this is the silicon forwarding latency
+- The 0.3ms ping measurement includes Linux network stack overhead on sender/receiver; the actual hardware forwarding is orders of magnitude faster
+
+```bash
+# Measured latency:
+ssh -i $SSH_KEY $HPE "sudo ip netns exec ns-inet ping -c 10 10.0.2.1"
+# rtt min/avg/max = 0.11/0.27/0.42 ms
+```
+
+### "Where does the inspection VM run?"
+
+**On Tier 3 x86 compute (576 cores), NOT on the DPU ARM cores.**
+
+The BF3 DPU has only 8 ARM A78 cores and 16 GB RAM — suitable for control plane tasks (rule management, health monitoring) but NOT for CPU-intensive deep packet inspection.
+
+The inspection VM runs on the x86 tier:
+- 576 cores available (AMD EPYC or Intel Xeon)
+- DPDK for zero-copy packet processing
+- First-N-packets only — once classified, all subsequent packets take the hardware fast path on the DPU
+- This architecture keeps the DPU focused on what it does best: line-rate forwarding in silicon
+
+---
+
+## TUI Monitor Commands Reference
+
+The PRISM Monitor TUI (`tui/prism_monitor.py`) provides a unified live dashboard showing traffic source, firewall state, and receiver simultaneously.
+
+### Launch Commands
+
+```bash
+# Full command with all options (run from project root on HPE server)
+python3 tui/prism_monitor.py \
+  --fw-url http://192.168.0.38:8443 \
+  --gen-url http://localhost:5001 \
+  --recv-url http://localhost:5002 \
+  --interval 0.5
+
+# Quick start with defaults (if running on HPE with default ports)
+python3 tui/prism_monitor.py
+
+# If accessing firewall via SSH tunnel (from laptop)
+python3 tui/prism_monitor.py --fw-url http://localhost:18443
+```
+
+### What the TUI Shows
+
+| Panel | Data Source | Content |
+|-------|-------------|---------|
+| Header | Local clock | Title + elapsed time + LIVE indicator |
+| TRAFFIC SOURCE | `GET {gen-url}/api/stats` | Per-port progress bars, conn/sec, success rate |
+| DPU FIREWALL | `GET {fw-url}/metrics` + `GET {fw-url}/rules` | Packets forwarded/dropped, active rules with in_hw status, throughput |
+| DESTINATION | `GET {recv-url}/api/stats` | Per-port connection counts, bytes received |
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--fw-url` | `http://192.168.0.38:8443` | Firewall REST API base URL |
+| `--gen-url` | `http://localhost:5001` | Traffic generator API base URL |
+| `--recv-url` | `http://localhost:5002` | Receiver API base URL |
+| `--interval` | `0.5` | Poll interval in seconds |
+
+### Requirements
+
+```bash
+pip install rich requests
+```
+
+### Exit
+
+Press `Ctrl+C` for clean shutdown.
