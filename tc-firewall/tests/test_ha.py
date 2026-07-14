@@ -92,9 +92,9 @@ class TestHeartbeatReceive:
 
     def test_receive_heartbeat_updates_timestamp(self):
         mgr = HAManager(peer_url="http://peer:8443")
-        before = time.time()
+        before = time.monotonic()
         mgr.receive_heartbeat(peer_generation=1, peer_role="ACTIVE")
-        after = time.time()
+        after = time.monotonic()
 
         assert before <= mgr.last_heartbeat_received <= after
 
@@ -116,7 +116,7 @@ class TestHeartbeatReceive:
             peer_url="http://peer:8443",
             heartbeat_timeout_ms=50,
         )
-        mgr.last_heartbeat_received = time.time() - 0.1  # 100ms ago, timeout is 50ms
+        mgr.last_heartbeat_received = time.monotonic() - 0.1  # 100ms ago, timeout is 50ms
         assert mgr.peer_alive is False
 
     def test_peer_not_alive_no_heartbeat_received(self):
@@ -132,7 +132,7 @@ class TestFailoverDetection:
             heartbeat_timeout_ms=300,
         )
         # Simulate 350ms since last heartbeat (3.5 missed intervals)
-        mgr.last_heartbeat_received = time.time() - 0.35
+        mgr.last_heartbeat_received = time.monotonic() - 0.35
         assert mgr.missed_heartbeats >= 3
 
     def test_missed_heartbeats_zero_when_fresh(self):
@@ -154,7 +154,7 @@ class TestFailoverDetection:
             heartbeat_timeout_ms=300,
         )
         # Exactly at timeout boundary
-        mgr.last_heartbeat_received = time.time() - 0.301
+        mgr.last_heartbeat_received = time.monotonic() - 0.301
         assert mgr.missed_heartbeats >= 3
         assert mgr.peer_alive is False
 
