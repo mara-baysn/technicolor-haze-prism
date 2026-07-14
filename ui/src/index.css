@@ -1,3 +1,23 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-void text-text font-sans antialiased;
+  }
+}
+
+@keyframes led-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px #F5C518; }
+  50% { opacity: 0.7; box-shadow: 0 0 8px #F5C518, 0 0 16px #F5C51844; }
+}
+
+.led-active {
+  animation: led-pulse 2s ease-in-out infinite;
+}
+
+/* Tabular numbers for data alignment */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}

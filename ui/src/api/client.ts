@@ -30,6 +30,8 @@ export interface FirewallMetrics {
   bytes_forwarded?: number
   bytes_dropped?: number
   active_rules?: number
+  total_rules?: number
+  hw_offloaded_rules?: number
   [key: string]: unknown
 }
 

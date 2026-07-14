@@ -115,34 +115,34 @@ export default function RulesPage() {
   const activeRules = metrics?.active_rules ?? rules.length
 
   return (
-    <div className="flex flex-col h-full px-6 py-4">
+    <div className="flex flex-col h-full px-5 py-3">
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-3">
         <div>
-          <h2 className="text-xl font-bold text-amber-400">Firewall Rules</h2>
-          <p className="text-sm text-gray-400 mt-1">
-            Default policy: <span className="text-red-400 font-mono">{defaultPolicy}</span>
-            {' '} | Active rules: <span className="text-amber-300 font-mono">{activeRules}</span>
+          <h2 className="text-sm font-bold text-text uppercase tracking-wide">Firewall Rules</h2>
+          <p className="text-[11px] text-muted mt-0.5 font-mono">
+            default: <span className="text-deny">{defaultPolicy}</span>
+            {' | '}active: <span className="text-signal">{activeRules}</span>
           </p>
         </div>
         <div className="flex gap-2">
           <button
             onClick={() => setShowAddForm(!showAddForm)}
-            className="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded transition-colors"
+            className="border border-signal text-signal text-xs font-bold px-3 py-1.5 rounded-[4px] transition-colors hover:bg-signal/10"
           >
             + Add Rule
           </button>
           <button
             onClick={() => setFlushConfirm(true)}
             disabled={loading || rules.length === 0}
-            className="bg-red-700 hover:bg-red-600 text-white text-sm font-medium px-4 py-2 rounded transition-colors disabled:opacity-50"
+            className="border border-deny text-deny text-xs font-bold px-3 py-1.5 rounded-[4px] transition-colors hover:bg-deny/10 disabled:border-muted/30 disabled:text-muted/40"
           >
             Flush All
           </button>
           <button
             onClick={loadRules}
             disabled={loading}
-            className="bg-gray-700 hover:bg-gray-600 text-white text-sm px-4 py-2 rounded transition-colors disabled:opacity-50"
+            className="border border-border text-muted text-xs px-3 py-1.5 rounded-[4px] transition-colors hover:text-text hover:border-muted disabled:opacity-50"
           >
             Refresh
           </button>
@@ -151,18 +151,20 @@ export default function RulesPage() {
 
       {/* Flush confirmation */}
       {flushConfirm && (
-        <div className="bg-red-900/30 border border-red-700 rounded-lg p-4 mb-4 flex items-center justify-between">
-          <span className="text-red-300 text-sm">Delete ALL {rules.length} rules? This cannot be undone.</span>
+        <div className="bg-deny/5 border border-deny/40 rounded-sm p-3 mb-3 flex items-center justify-between">
+          <span className="text-deny text-xs font-mono">
+            Delete ALL {rules.length} rules? Cannot undo.
+          </span>
           <div className="flex gap-2">
             <button
               onClick={handleFlush}
-              className="bg-red-600 hover:bg-red-500 text-white text-sm px-3 py-1.5 rounded"
+              className="bg-deny text-void text-xs font-bold px-3 py-1 rounded-[4px]"
             >
-              Confirm Flush
+              Confirm
             </button>
             <button
               onClick={() => setFlushConfirm(false)}
-              className="bg-gray-700 hover:bg-gray-600 text-white text-sm px-3 py-1.5 rounded"
+              className="border border-border text-muted text-xs px-3 py-1 rounded-[4px] hover:text-text"
             >
               Cancel
             </button>
@@ -172,93 +174,86 @@ export default function RulesPage() {
 
       {/* Add Rule Form */}
       {showAddForm && (
-        <form onSubmit={handleAddRule} className="bg-gray-900/80 border border-gray-700 rounded-lg p-4 mb-4">
-          <div className="grid grid-cols-7 gap-3 mb-3">
-            <div>
-              <label className="text-xs text-gray-400 block mb-1">Protocol</label>
+        <form onSubmit={handleAddRule} className="bg-surface border border-border rounded-sm p-3 mb-3">
+          <div className="grid grid-cols-7 gap-2 mb-2">
+            <FormField label="Protocol">
               <select
                 value={formProtocol}
                 onChange={(e) => setFormProtocol(e.target.value)}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-white"
+                className="w-full bg-void border border-border rounded-sm px-2 py-1.5 text-xs font-mono text-text"
               >
                 <option value="tcp">TCP</option>
                 <option value="udp">UDP</option>
                 <option value="icmp">ICMP</option>
               </select>
-            </div>
-            <div>
-              <label className="text-xs text-gray-400 block mb-1">Src IP</label>
+            </FormField>
+            <FormField label="Src IP">
               <input
                 type="text"
                 value={formSrcIp}
                 onChange={(e) => setFormSrcIp(e.target.value)}
                 placeholder="any"
-                className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-white placeholder-gray-600"
+                className="w-full bg-void border border-border rounded-sm px-2 py-1.5 text-xs font-mono text-text placeholder-muted/50"
               />
-            </div>
-            <div>
-              <label className="text-xs text-gray-400 block mb-1">Dst IP</label>
+            </FormField>
+            <FormField label="Dst IP">
               <input
                 type="text"
                 value={formDstIp}
                 onChange={(e) => setFormDstIp(e.target.value)}
                 placeholder="any"
-                className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-white placeholder-gray-600"
+                className="w-full bg-void border border-border rounded-sm px-2 py-1.5 text-xs font-mono text-text placeholder-muted/50"
               />
-            </div>
-            <div>
-              <label className="text-xs text-gray-400 block mb-1">Src Port</label>
+            </FormField>
+            <FormField label="Src Port">
               <input
                 type="number"
                 value={formSrcPort}
                 onChange={(e) => setFormSrcPort(e.target.value)}
                 placeholder="any"
-                className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-white placeholder-gray-600"
+                className="w-full bg-void border border-border rounded-sm px-2 py-1.5 text-xs font-mono text-text placeholder-muted/50"
               />
-            </div>
-            <div>
-              <label className="text-xs text-gray-400 block mb-1">Dst Port</label>
+            </FormField>
+            <FormField label="Dst Port">
               <input
                 type="number"
                 value={formDstPort}
                 onChange={(e) => setFormDstPort(e.target.value)}
                 placeholder="any"
-                className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-white placeholder-gray-600"
+                className="w-full bg-void border border-border rounded-sm px-2 py-1.5 text-xs font-mono text-text placeholder-muted/50"
               />
-            </div>
-            <div>
-              <label className="text-xs text-gray-400 block mb-1">Action</label>
+            </FormField>
+            <FormField label="Action">
               <select
                 value={formAction}
                 onChange={(e) => setFormAction(e.target.value)}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-white"
+                className="w-full bg-void border border-border rounded-sm px-2 py-1.5 text-xs font-mono text-text"
               >
                 <option value="DENY">DENY</option>
                 <option value="ALLOW">ALLOW</option>
               </select>
-            </div>
-            <div>
-              <label className="text-xs text-gray-400 block mb-1">Priority</label>
+            </FormField>
+            <FormField label="Priority">
               <input
                 type="number"
                 value={formPriority}
                 onChange={(e) => setFormPriority(e.target.value)}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-white"
+                className="w-full bg-void border border-border rounded-sm px-2 py-1.5 text-xs font-mono text-text"
               />
-            </div>
+            </FormField>
           </div>
           <div className="flex gap-2">
             <button
               type="submit"
               disabled={loading}
-              className="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded transition-colors disabled:opacity-50"
+              className="bg-signal text-void text-xs font-bold px-4 py-1.5 rounded-[4px] transition-colors hover:bg-signal/90 disabled:opacity-50"
             >
               Create Rule
             </button>
             <button
               type="button"
               onClick={() => { setShowAddForm(false); resetForm() }}
-              className="bg-gray-700 hover:bg-gray-600 text-white text-sm px-4 py-2 rounded transition-colors"
+              className="border border-border text-muted text-xs px-4 py-1.5 rounded-[4px] hover:text-text"
             >
               Cancel
             </button>
@@ -267,84 +262,83 @@ export default function RulesPage() {
       )}
 
       {error && (
-        <div className="text-sm text-red-400 bg-red-900/20 border border-red-800 rounded px-3 py-2 mb-4">
+        <div className="text-xs text-deny font-mono bg-deny/5 border border-deny/30 rounded-sm px-3 py-2 mb-3">
           {error}
         </div>
       )}
 
       {/* Rules Table */}
       <div className="flex-1 overflow-auto">
-        <table className="w-full text-sm">
-          <thead className="sticky top-0 bg-gray-950">
-            <tr className="text-left text-xs text-gray-400 uppercase tracking-wider border-b border-gray-800">
-              <th className="px-3 py-2">ID</th>
-              <th className="px-3 py-2">Protocol</th>
-              <th className="px-3 py-2">Src IP</th>
-              <th className="px-3 py-2">Dst IP</th>
-              <th className="px-3 py-2">Src Port</th>
-              <th className="px-3 py-2">Dst Port</th>
-              <th className="px-3 py-2">Action</th>
-              <th className="px-3 py-2">Priority</th>
-              <th className="px-3 py-2">Offload</th>
-              <th className="px-3 py-2">Packets</th>
-              <th className="px-3 py-2"></th>
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-void">
+            <tr className="text-left text-[10px] text-muted uppercase tracking-wider border-b border-border">
+              <th className="px-2 py-2 font-sans">ID</th>
+              <th className="px-2 py-2 font-sans">Protocol</th>
+              <th className="px-2 py-2 font-sans">Src IP</th>
+              <th className="px-2 py-2 font-sans">Dst IP</th>
+              <th className="px-2 py-2 font-sans">Src Port</th>
+              <th className="px-2 py-2 font-sans">Dst Port</th>
+              <th className="px-2 py-2 font-sans">Action</th>
+              <th className="px-2 py-2 font-sans">Priority</th>
+              <th className="px-2 py-2 font-sans">in_hw</th>
+              <th className="px-2 py-2 font-sans">Packets</th>
+              <th className="px-2 py-2 font-sans"></th>
             </tr>
           </thead>
           <tbody>
             {rules.map((rule) => (
-              <tr key={rule.id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
-                <td className="px-3 py-2 font-mono text-gray-400 text-xs">{rule.id}</td>
-                <td className="px-3 py-2 font-mono text-gray-200">{rule.protocol ?? '-'}</td>
-                <td className="px-3 py-2 font-mono text-gray-300">{rule.src_ip ?? '*'}</td>
-                <td className="px-3 py-2 font-mono text-gray-300">{rule.dst_ip ?? '*'}</td>
-                <td className="px-3 py-2 font-mono text-gray-300">{rule.src_port ?? '*'}</td>
-                <td className="px-3 py-2 font-mono text-gray-300">{rule.dst_port ?? '*'}</td>
-                <td className="px-3 py-2">
-                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                    (rule.action ?? '').toUpperCase() === 'DENY'
-                      ? 'bg-red-900/50 text-red-300'
-                      : 'bg-green-900/50 text-green-300'
+              <tr key={rule.id} className="border-b border-border/50 hover:bg-surface/50">
+                <td className="px-2 py-1.5 font-mono text-muted">{rule.id}</td>
+                <td className="px-2 py-1.5 font-mono text-text">{rule.protocol ?? '-'}</td>
+                <td className="px-2 py-1.5 font-mono text-text">{rule.src_ip ?? '*'}</td>
+                <td className="px-2 py-1.5 font-mono text-text">{rule.dst_ip ?? '*'}</td>
+                <td className="px-2 py-1.5 font-mono text-text tabular-nums">{rule.src_port ?? '*'}</td>
+                <td className="px-2 py-1.5 font-mono text-text tabular-nums">{rule.dst_port ?? '*'}</td>
+                <td className="px-2 py-1.5">
+                  <span className={`font-mono font-bold ${
+                    (rule.action ?? '').toUpperCase() === 'DENY' ? 'text-deny' : 'text-allow'
                   }`}>
                     {(rule.action ?? 'ALLOW').toUpperCase()}
                   </span>
                 </td>
-                <td className="px-3 py-2 font-mono text-gray-400">{rule.priority ?? '-'}</td>
-                <td className="px-3 py-2">
+                <td className="px-2 py-1.5 font-mono text-muted tabular-nums">{rule.priority ?? '-'}</td>
+                <td className="px-2 py-1.5">
                   {rule.in_hw ? (
-                    <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-green-900/50 text-green-300">
-                      HW OFFLOADED
+                    <span className="inline-flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-signal led-active" />
+                      <span className="text-[9px] font-mono text-signal font-bold">HW</span>
                     </span>
                   ) : (
-                    <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-yellow-900/50 text-yellow-300">
-                      SOFTWARE
-                    </span>
+                    <span className="text-[9px] font-mono text-muted">SW</span>
                   )}
                 </td>
-                <td className="px-3 py-2 font-mono text-gray-400">{(rule.packets ?? 0).toLocaleString()}</td>
-                <td className="px-3 py-2">
+                <td className="px-2 py-1.5 font-mono text-muted tabular-nums">
+                  {(rule.packets ?? 0).toLocaleString()}
+                </td>
+                <td className="px-2 py-1.5">
                   {deleteConfirm === rule.id ? (
                     <div className="flex gap-1">
                       <button
                         onClick={() => handleDelete(rule.id)}
                         disabled={loading}
-                        className="text-xs bg-red-600 text-white px-2 py-1 rounded disabled:opacity-50"
+                        className="text-[10px] text-deny font-bold hover:underline disabled:opacity-50"
                       >
-                        Yes
+                        confirm
                       </button>
                       <button
                         onClick={() => setDeleteConfirm(null)}
-                        className="text-xs bg-gray-600 text-white px-2 py-1 rounded"
+                        className="text-[10px] text-muted hover:text-text"
                       >
-                        No
+                        no
                       </button>
                     </div>
                   ) : (
                     <button
                       onClick={() => setDeleteConfirm(rule.id)}
                       disabled={loading}
-                      className="text-xs text-red-400 hover:text-red-300 hover:bg-red-900/30 px-2 py-1 rounded transition-colors disabled:opacity-50"
+                      className="text-[10px] text-deny hover:underline disabled:opacity-50"
                     >
-                      Delete
+                      delete
                     </button>
                   )}
                 </td>
@@ -353,14 +347,25 @@ export default function RulesPage() {
           </tbody>
         </table>
         {rules.length === 0 && !loading && (
-          <div className="text-center py-12 text-gray-500">
-            No rules configured. Default policy: <span className="text-red-400">{defaultPolicy}</span>
+          <div className="text-center py-8 text-muted text-xs font-mono">
+            No rules configured. Default policy: <span className="text-deny">{defaultPolicy}</span>
           </div>
         )}
         {loading && rules.length === 0 && (
-          <div className="text-center py-12 text-gray-500">Loading rules...</div>
+          <div className="text-center py-8 text-muted text-xs font-mono">Loading...</div>
         )}
       </div>
+    </div>
+  )
+}
+
+function FormField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="text-[10px] text-muted uppercase tracking-wider block mb-0.5 font-sans">
+        {label}
+      </label>
+      {children}
     </div>
   )
 }
