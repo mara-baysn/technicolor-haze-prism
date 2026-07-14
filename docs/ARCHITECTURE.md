@@ -834,6 +834,153 @@ sequenceDiagram
 
 ---
 
+## 12. Performance Architecture
+
+### Latency Budget
+
+```
+NEW CONNECTION (slow path — first packet per flow):
++---------------------------------------------------------------------+
+| Segment                           | Latency        | Where           |
+|-----------------------------------|----------------|-----------------|
+| Tenant VM -> Tenant DPU eSwitch   | < 1 us         | PCIe + silicon  |
+| VXLAN encap on tenant DPU         | < 1 us         | DPU silicon     |
+| Fabric transit (leaf-spine-leaf)  | 1-2 us         | Clos switch     |
+| Tier 3 DPU eSwitch receive        | < 1 us         | DPU silicon     |
+| CT MISS -> deliver to VM In VF    | 2-5 us         | PCIe to host    |
+| VM DPDK RX burst + parse headers  | 1-3 us         | x86 DPDK        |
+| Conntrack lookup + ACL evaluate   | 2-10 us        | x86 software    |
+| AppID (first N pkts, scale-out)   | 10-50 us       | x86 Hyperscan   |
+| gRPC offload request to DPU       | 5-15 us        | PCIe + ARM      |
+| DPU programs session table        | 5-10 us        | DOCA Flow API   |
+| Forward via Out VF to destination | 2-5 us         | PCIe + silicon  |
+|-----------------------------------|----------------|-----------------|
+| TOTAL first packet (v1.0, L3/L4)  | 20-45 us       |                 |
+| TOTAL first packet (scale-out L7) | 45-120 us      |                 |
++---------------------------------------------------------------------+
+
+ESTABLISHED CONNECTION (fast path — offloaded):
++---------------------------------------------------------------------+
+| Segment                           | Latency        | Where           |
+|-----------------------------------|----------------|-----------------|
+| Tenant VM -> Tenant DPU eSwitch   | < 1 us         | PCIe + silicon  |
+| VXLAN encap                       | < 1 us         | DPU silicon     |
+| Fabric transit                    | 1-2 us         | Clos switch     |
+| Tier 3 DPU eSwitch CT HIT        | < 1 us         | DPU silicon     |
+| Forward direct (VM BYPASSED)      | < 1 us         | eSwitch ASAP2   |
+|-----------------------------------|----------------|-----------------|
+| TOTAL offloaded packet            | < 5 us         | All hardware    |
+| CPU involved                      | ZERO           | Pure silicon    |
++---------------------------------------------------------------------+
+
+PoC MEASURED (single host, no fabric):
++---------------------------------------------------------------------+
+| Metric                            | Value          | Method          |
+|-----------------------------------|----------------|-----------------|
+| Ping latency (VF0 -> VF3)        | 0.069 ms       | ping -c 100     |
+| TCP connection setup              | < 1 ms         | socket.connect  |
+| iperf3 throughput (4 streams)     | 148 Gbps       | 10s test        |
+| CPU during 148 Gbps forwarding   | ~0%            | htop            |
+| Rule add/remove latency          | < 50 ms        | curl timing     |
+| tc-flower in_hw programming      | < 10 ms        | tc filter add   |
++---------------------------------------------------------------------+
+```
+
+### Throughput Model
+
+```
+PER-TENANT THROUGHPUT:
++------------------------------------------------------------------+
+|                                                                    |
+|  Tenant traffic (ingress + egress combined)                       |
+|                                                                    |
+|  +-----------+     +------------+     +------------------+        |
+|  | New flows |     | Inspection |     | Offload decision |        |
+|  | (20-30%)  |---->| VM (DPDK)  |---->| gRPC to DPU      |        |
+|  +-----------+     +------------+     +------------------+        |
+|       |                                        |                  |
+|       |  VM throughput: 20-40 Gbps             |                  |
+|       |  (16 cores, DPDK poll-mode)            v                  |
+|       |                              +------------------+         |
+|       |                              | eSwitch session  |         |
+|       v                              | table (hardware) |         |
+|  +-----------+                       +------------------+         |
+|  | Offloaded |                              |                     |
+|  | flows     |<-----------------------------+                     |
+|  | (70-80%)  |                                                    |
+|  +-----------+                                                    |
+|       |                                                           |
+|       |  Hardware throughput: up to 200 Gbps per DPU              |
+|       |  (ASAP2, zero CPU, line rate)                             |
+|       v                                                           |
+|                                                                    |
+|  AGGREGATE per tenant:                                            |
+|    VM handles 20-30% at 20-40 Gbps                                |
+|    Hardware handles 70-80% at line rate                            |
+|    Effective: 40G / 0.25 = 160 Gbps theoretical                   |
+|    Target SLA: 100 Gbps per tenant (conservative)                 |
+|                                                                    |
++------------------------------------------------------------------+
+
+AGGREGATE per DPU (83 tenants):
+  - Line rate: 200 Gbps (BF3 B3220, 2x100G)
+  - All tenants share line rate for offloaded flows
+  - Oversubscription: 83 tenants x 100G SLA = 8.3 Tbps committed
+    vs 200G physical = 41.5:1 oversubscription on the DPU
+  - Works because: most tenants don't burst simultaneously
+  - Burst capacity: any single tenant can burst to full 200G
+    (if others are idle)
+```
+
+### Packet Rate Analysis
+
+```
++----------------------------------------------------------------+
+| Packet Size | Packets/sec at 100G | Packets/sec at 148G (PoC)  |
+|-------------|--------------------|-----------------------------|
+| 64 bytes    | 148.8 Mpps         | 220.2 Mpps                  |
+| 512 bytes   | 24.4 Mpps          | 36.1 Mpps                   |
+| 1500 bytes  | 8.3 Mpps           | 12.3 Mpps                   |
+| 9000 bytes  | 1.4 Mpps           | 2.1 Mpps                    |
++----------------------------------------------------------------+
+
+DPU eSwitch capacity: handles ALL of the above in silicon (zero CPU)
+
+VM inspection capacity (16 cores DPDK):
+  - 64B:   ~20-40 Mpps (CPU-bound at small packets)
+  - 1500B: ~20-30 Mpps (limited by inspection logic complexity)
+  - With 80% offload: VM only sees 20% of packets
+    -> 148G * 20% = ~30 Gbps to VM = 2.5 Mpps at 1500B (easy)
+```
+
+### Bottlenecks and Scaling
+
+```
++------------------------------------------------------------------+
+| Bottleneck              | Limit            | Mitigation           |
+|-------------------------|------------------|----------------------|
+| DPU line rate           | 200 Gbps (2x100G)| Scale-out: add DPUs |
+| Session table entries   | 2-16M per DPU    | Per-tenant quota     |
+| PCIe bandwidth (host)   | ~256 Gbps (Gen5) | NUMA alignment       |
+| VM inspection cores     | 16 per VM        | Increase cores or    |
+|                         |                  | offload more (>80%) |
+| ARM cores (offload mgmt)| 8 per DPU        | Shared across VMs    |
+| New flow rate (to VM)   | ~1M flows/sec    | DPU rate-limit meter |
+| gRPC offload latency    | 5-15 us          | Async batching       |
++------------------------------------------------------------------+
+
+SCALING STRATEGY:
+  Per-tenant: increase VM cores (2->4->8->16)
+  Per-host: add DPUs (2->3->4, NUMA-aligned)
+  Per-cluster: add Tier 3 hosts (scale-out)
+  
+  When 1 DPU is full (83 tenants):
+    -> herd-manager places new tenants on DPU #2
+    -> DPU Orchestrator steers traffic accordingly
+```
+
+---
+
 ## Appendix: Key Numbers
 
 | Parameter | Value |
