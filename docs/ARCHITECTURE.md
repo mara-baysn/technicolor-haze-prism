@@ -522,3 +522,314 @@ sequenceDiagram
 | Recovery SLO (v1.0) | < 15 seconds (restart), < 5 seconds (warm standby) |
 | BF3 SKU | B3220 (2x100G, ConnectX-7 based) |
 | Fail mode default | Fail-closed (new flows dropped) |
+
+---
+
+## 9. Per-Tenant Firewall VM Model (Production)
+
+Each tenant gets their own dedicated firewall VM because:
+- Each tenant owns public IP(s) — the firewall IS the tenant's internet gateway
+- The firewall binds the public IP on its In (Red) interface
+- DDoS isolation: one tenant's flood doesn't affect others
+- Independent scaling: heavy tenants get more cores
+- Clean 3-interface model per tenant (In=Red/Internet, Out=Green/Private, Mgmt=Blue)
+
+### Deployment Layout (Single Tier 3 Host)
+
+```
+Tier 3 Host (512 cores, 1TB RAM, 2-4 BF3 DPUs)
+═══════════════════════════════════════════════════════════════════
+
+  ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐
+  │  Tenant A FW VM   │  │  Tenant B FW VM   │  │  Tenant C FW VM   │
+  │  4 cores, 8GB     │  │  4 cores, 8GB     │  │  2 cores, 4GB     │
+  │                   │  │                   │  │                   │
+  │  In VF (Red)      │  │  In VF (Red)      │  │  In VF (Red)      │
+  │   ├─ Public IP:   │  │   ├─ Public IP:   │  │   ├─ Public IP:   │
+  │   │  1.2.3.4      │  │   │  5.6.7.8      │  │   │  9.10.11.12   │
+  │   │  1.2.3.5      │  │   │               │  │   │               │
+  │                   │  │                   │  │                   │
+  │  Out VF (Green)   │  │  Out VF (Green)   │  │  Out VF (Green)   │
+  │   └─ Tenant VLAN/ │  │   └─ Tenant VLAN/ │  │   └─ Tenant VLAN/ │
+  │      VNI=10100    │  │      VNI=10200    │  │      VNI=10300    │
+  │                   │  │                   │  │                   │
+  │  Mgmt VF (Blue)   │  │  Mgmt VF (Blue)   │  │  Mgmt VF (Blue)   │
+  │   └─ 10.99.A.1    │  │   └─ 10.99.B.1    │  │   └─ 10.99.C.1    │
+  │                   │  │                   │  │                   │
+  │  DPDK pipeline:   │  │  DPDK pipeline:   │  │  DPDK pipeline:   │
+  │  Conntrack → ACL  │  │  Conntrack → ACL  │  │  Conntrack → ACL  │
+  │  → Offload to DPU │  │  → Offload to DPU │  │  → Offload to DPU │
+  └─────────┬─────────┘  └─────────┬─────────┘  └─────────┬─────────┘
+            │ 3 VFs                 │ 3 VFs                 │ 3 VFs
+  ══════════╪═══════════════════════╪═══════════════════════╪══════════
+            │ PCIe (VFIO passthrough)                       │
+  ┌─────────┴───────────────────────┴───────────────────────┴─────────┐
+  │                       BF3 DPU eSwitch                              │
+  │                                                                    │
+  │  Session Table (per-tenant entries):                               │
+  │    Tenant A: (pub_ip=1.2.3.4, 5-tuple) → FWD to Out VF-A          │
+  │    Tenant B: (pub_ip=5.6.7.8, 5-tuple) → FWD to Out VF-B          │
+  │    Tenant C: (pub_ip=9.10.11.12, 5-tuple) → FWD to Out VF-C       │
+  │                                                                    │
+  │  New flows (CT MISS) → delivered to correct tenant's In VF         │
+  │  Offloaded flows (CT HIT) → bypass tenant VM entirely             │
+  │                                                                    │
+  │  Offload Daemon (ARM):                                             │
+  │    Receives gRPC from ALL tenant VMs                               │
+  │    Programs shared session table with per-tenant entries            │
+  └────────────────────────────────────────────────────────────────────┘
+            │
+     ═══════╪═══════  Fabric → Edge Router → Internet
+            │
+     Public IPs announced via BGP from Edge Router
+     Routed to specific DPU uplink based on destination IP
+```
+
+### Traffic Flow — Ingress (Internet → Tenant)
+
+```mermaid
+sequenceDiagram
+    participant Internet
+    participant EdgeRouter
+    participant Fabric
+    participant DPU as BF3 DPU eSwitch
+    participant FW_VM as Tenant A FW VM
+    participant TenantNet as Tenant A Private Net
+
+    Internet->>EdgeRouter: Packet to 1.2.3.4:443
+    EdgeRouter->>Fabric: Route to Tier 3 host (owns 1.2.3.4)
+    Fabric->>DPU: Deliver to DPU uplink
+
+    alt CT HIT (offloaded session)
+        DPU->>TenantNet: Hardware bypass → Out VF → overlay to tenant (< 5μs)
+    else CT MISS (new connection)
+        DPU->>FW_VM: Deliver to Tenant A In VF (Red interface)
+        FW_VM->>FW_VM: DPDK inspect: conntrack + ACL + NAT (pub→priv)
+        FW_VM->>DPU: gRPC: program session (DNAT 1.2.3.4→10.0.1.5, offload)
+        FW_VM->>TenantNet: Forward via Out VF (Green) to tenant private net
+    end
+```
+
+### Traffic Flow — Egress (Tenant → Internet)
+
+```mermaid
+sequenceDiagram
+    participant TenantVM as Tenant A VM (10.0.1.5)
+    participant TenantDPU as Tenant Host DPU
+    participant Fabric
+    participant DPU as Tier 3 BF3 DPU
+    participant FW_VM as Tenant A FW VM
+    participant EdgeRouter
+    participant Internet
+
+    TenantVM->>TenantDPU: Packet from 10.0.1.5 to 8.8.8.8
+    TenantDPU->>Fabric: VXLAN encap (VNI=10100) → Tier 3
+    Fabric->>DPU: Deliver to DPU
+
+    alt CT HIT (offloaded)
+        DPU->>EdgeRouter: SNAT (10.0.1.5→1.2.3.4), hardware forward
+        EdgeRouter->>Internet: From 1.2.3.4
+    else CT MISS (new)
+        DPU->>FW_VM: Deliver to Tenant A Out VF (Green, reverse direction)
+        FW_VM->>FW_VM: Egress policy check + SNAT (10.0.1.5→1.2.3.4)
+        FW_VM->>DPU: gRPC: program session (SNAT + offload)
+        FW_VM->>EdgeRouter: Forward via In VF (Red) toward internet
+        EdgeRouter->>Internet: From 1.2.3.4
+    end
+```
+
+### Scale Calculations
+
+| Resource | Per Tenant | Per DPU (250 VFs) | Per Host (2 DPUs) |
+|----------|-----------|-------------------|-------------------|
+| VFs | 3 (In + Out + Mgmt) | 83 tenants | 166 tenants |
+| CPU cores | 2-4 (DPDK pinned) | — | 166 × 3 = 498 cores (fits 512) |
+| RAM | 4-8 GB (hugepages) | — | 166 × 6 GB = 996 GB (fits 1TB) |
+| Session table entries | ~50K per tenant | 4M per DPU | 8M per host |
+| Bandwidth (offloaded) | Up to 100 Gbps | 200 Gbps line rate | 400 Gbps |
+
+---
+
+## 10. High Availability — Standard vs Premium Tenants
+
+### Standard Tenants: Cold Failover (3-10 seconds)
+
+For most tenants, HA is a cold failover model:
+
+```
+NORMAL:
+  Host-A: [Tenant-1 VM] [Tenant-2 VM] [Tenant-3 VM] ...
+  Host-B: [Tenant-50 VM] [Tenant-51 VM] ...
+
+HOST-A DIES:
+  1. herd-manager detects failure (health check, 1-2s)
+  2. herd-manager selects Host-C (has capacity)
+  3. herd-manager tells Host-C herd-handler: "boot Tenant-1,2,3 VMs"
+  4. Host-C: allocate VFs, bind VFIO, boot VM with Cloud Hypervisor (~5s)
+  5. DPU Orchestrator: re-program DPU on Host-C to steer traffic
+  6. Edge Router: update routes (BGP withdraw from Host-A, announce from Host-C)
+  7. Total failover: ~8-15 seconds
+  8. Session state: LOST (all connections reset, TCP retransmits within 3s)
+```
+
+```
+Timeline:
+  t=0s    Host-A power failure
+  t=1-2s  herd-manager detects (missed 3 health checks @ 500ms)
+  t=2-3s  Scheduling decision (select Host-C)
+  t=3-8s  VM boot (Cloud Hypervisor + VFIO VF attach + DPDK init)
+  t=8-10s DPU steering update + BGP route propagation
+  t=10s   Traffic flowing to new VM
+  
+  Impact: 8-15 second disruption. All TCP sessions reset.
+  Acceptable for: web servers, APIs, non-realtime workloads.
+```
+
+### Premium Tenants: Active-Standby (Sub-Second Failover)
+
+For premium tenants (paying for HA SLA), deploy an active-standby pair:
+
+```
+NORMAL OPERATION:
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                                                                 │
+  │  Host-A                          Host-B                         │
+  │  ┌─────────────────────┐         ┌─────────────────────┐       │
+  │  │ Tenant-X FW VM      │         │ Tenant-X FW VM      │       │
+  │  │ (ACTIVE)            │         │ (STANDBY)           │       │
+  │  │                     │         │                     │       │
+  │  │ Public IP: 1.2.3.4  │         │ (ready, no traffic) │       │
+  │  │ Processing traffic   │────────▶│ Session replication  │       │
+  │  │                     │ sync    │ (receives CT state)  │       │
+  │  └─────────────────────┘         └─────────────────────┘       │
+  │         ▲                                                       │
+  │         │ traffic                                               │
+  │         │                                                       │
+  └─────────┼───────────────────────────────────────────────────────┘
+            │
+      Edge Router (BGP: 1.2.3.4 → Host-A DPU)
+```
+
+```
+FAILOVER (Host-A dies):
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                                                                 │
+  │  Host-A (DEAD)                   Host-B                         │
+  │  ┌─────────────────────┐         ┌─────────────────────┐       │
+  │  │        ████████████ │         │ Tenant-X FW VM      │       │
+  │  │        ██ FAILED ██ │         │ (NOW ACTIVE)        │       │
+  │  │        ████████████ │         │                     │       │
+  │  │                     │         │ Public IP: 1.2.3.4  │       │
+  │  │                     │         │ Session table: warm  │       │
+  │  │                     │         │ (replicated state)   │       │
+  │  └─────────────────────┘         └─────────────────────┘       │
+  │                                          ▲                      │
+  │                                          │ traffic              │
+  └──────────────────────────────────────────┼──────────────────────┘
+                                             │
+      Edge Router (BGP: 1.2.3.4 → Host-B DPU now)
+```
+
+#### Active-Standby Components:
+
+1. **Session Replication** (continuous):
+   - Active VM streams CT state changes to Standby via dedicated sync channel (Blue plane)
+   - Protocol: gRPC stream of (5-tuple, state, NAT mapping, offload status)
+   - Bandwidth: ~1-10 Mbps per tenant (depends on new flow rate)
+   - Standby maintains warm session table (not programming DPU yet)
+
+2. **Health Monitoring**:
+   - Standby pings Active every 100ms via Blue plane
+   - 3 missed pings = failover trigger (300ms detection)
+   - OR: DPU-level BFD (Bidirectional Forwarding Detection) at 50ms intervals
+
+3. **Failover Sequence** (sub-second):
+```
+Timeline:
+  t=0ms     Host-A failure
+  t=100-300ms  Standby detects (missed pings)
+  t=300-400ms  Standby promotes to Active
+  t=400-500ms  Standby programs DPU session table from replicated state
+  t=500-600ms  DPU Orchestrator updates DPU steering rules
+  t=600-800ms  Edge Router BGP update (or GARP for L2 failover)
+  t=800ms   Traffic flowing to new Active
+  
+  Impact: <1 second disruption. Most TCP sessions survive (no reset).
+  Session table was pre-replicated — offloaded flows resume immediately.
+```
+
+4. **Cost per Premium Tenant**:
+   - 2× VM resources (active + standby)
+   - 2× VFs consumed (6 instead of 3)
+   - Dedicated sync bandwidth on Blue plane
+   - Price: ~2× standard tenant
+
+#### Session Replication Detail:
+
+```mermaid
+sequenceDiagram
+    participant ActiveVM as Active FW VM
+    participant SyncCh as Sync Channel (Blue)
+    participant StandbyVM as Standby FW VM
+    participant StandbyDPU as Standby DPU
+
+    loop Every new session offloaded
+        ActiveVM->>SyncCh: SessionSync(5-tuple, NAT, state=ESTABLISHED)
+        SyncCh->>StandbyVM: Replicate session entry
+        StandbyVM->>StandbyVM: Store in warm table (not yet in DPU)
+    end
+
+    Note over ActiveVM: HOST FAILURE
+
+    StandbyVM->>StandbyVM: Promote to Active (300ms)
+    StandbyVM->>StandbyDPU: Bulk program all replicated sessions
+    StandbyDPU->>StandbyDPU: Session table now live
+    Note over StandbyVM: Traffic flowing through standby (<1s total)
+```
+
+### Comparison Table
+
+| Feature | Standard Tenant | Premium Tenant (Active-Standby) |
+|---------|----------------|-------------------------------|
+| Failover time | 8-15 seconds | <1 second |
+| Session survival | No (all reset) | Yes (replicated) |
+| Resource cost | 1× (3 VFs, 2-4 cores) | 2× (6 VFs, 4-8 cores) |
+| DDoS isolation | Yes | Yes |
+| RPO (data loss) | Last few seconds of flows | Near-zero (continuous replication) |
+| RTO (recovery time) | 8-15s | <1s |
+| Monthly cost multiplier | 1× | ~2-2.5× |
+| Suitable for | Web, APIs, dev/test | Databases, real-time, financial |
+
+---
+
+## 11. Orchestration — Who Manages All This?
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CONTROL PLANE                                  │
+│                                                                  │
+│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐   │
+│  │ Tenant API  │  │ herd-manager │  │  DPU Orchestrator     │   │
+│  │ (user-facing)│  │ (VM lifecycle)│  │  (eSwitch steering)  │   │
+│  └──────┬──────┘  └──────┬───────┘  └──────────┬───────────┘   │
+│         │                 │                      │               │
+│         │  "Create FW     │  "Boot VM on        │  "Steer VNI   │
+│         │   for tenant"   │   Host-A with       │   to VF-pair  │
+│         │                 │   3 VFs"            │   on DPU-X"   │
+│         ▼                 ▼                      ▼               │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │              Temporal Workflow Engine                       │   │
+│  │  (orchestrates multi-step provisioning with retries)       │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+         │                    │                      │
+         ▼                    ▼                      ▼
+    ┌──────────┐       ┌───────────┐         ┌───────────────┐
+    │ Prism    │       │ herd-     │         │ DPU Agent     │
+    │ Admin API│       │ handler   │         │ (per DPU)     │
+    │ (per VM) │       │ (per host)│         │               │
+    │ :8443    │       │           │         │ Programs      │
+    │ Blue     │       │ Boot VM,  │         │ eSwitch,      │
+    │ plane    │       │ attach VFs│         │ session table │
+    └──────────┘       └───────────┘         └───────────────┘
+```
