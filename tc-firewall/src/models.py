@@ -81,3 +81,48 @@ class Session(BaseModel):
     packets: int = 0
     bytes: int = 0
     timeout: Optional[int] = None
+
+
+# --- NAT Models ---
+
+
+class SNATRule(BaseModel):
+    """Request to create a source NAT rule (egress: private IP -> public IP)."""
+    private_ip: str
+    public_ip: str
+    comment: Optional[str] = None
+
+
+class DNATRule(BaseModel):
+    """Request to create a destination NAT rule (ingress: public IP -> private IP)."""
+    public_ip: str
+    public_port: int = Field(..., ge=1, le=65535)
+    private_ip: str
+    private_port: int = Field(..., ge=1, le=65535)
+    protocol: str = "tcp"
+    comment: Optional[str] = None
+
+
+class PortForwardRule(BaseModel):
+    """Request to create a port forwarding rule (public:port -> private:port)."""
+    public_ip: str
+    public_port: int = Field(..., ge=1, le=65535)
+    private_ip: str
+    private_port: int = Field(..., ge=1, le=65535)
+    protocol: str = "tcp"
+    comment: Optional[str] = None
+
+
+class NATEntry(BaseModel):
+    """A NAT rule entry with metadata and statistics."""
+    id: str
+    type: str  # "snat", "dnat", "forward"
+    public_ip: str
+    public_port: Optional[int] = None
+    private_ip: str
+    private_port: Optional[int] = None
+    protocol: Optional[str] = None
+    in_hw: bool = False
+    packets: int = 0
+    bytes: int = 0
+    created_at: float

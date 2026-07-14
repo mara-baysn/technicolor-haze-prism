@@ -1017,6 +1017,84 @@ SCALING STRATEGY:
 
 ---
 
+## 13. NAT Offload Architecture (SNAT / DNAT / Port Forwarding)
+
+### How NAT Fits the Traffic Flow
+
+The Prism firewall VM performs NAT as part of its inspection pipeline. When a new
+connection is allowed, the VM applies:
+
+- **DNAT on ingress**: public IP:port -> tenant private IP:port (for inbound traffic)
+- **SNAT on egress**: tenant private IP -> public IP (for outbound traffic)
+- **Port Forwarding**: DNAT with an additional port rewrite (public:port -> private:different_port)
+
+### PoC Implementation (tc-flower pedit)
+
+In the PoC, NAT is implemented via tc-flower `pedit` actions on the DPU eSwitch
+representor ports. This proves the concept of hardware-offloaded address rewriting
+at line rate:
+
+```
+SNAT (egress, on Out VF representor — pf0vf3):
+  tc filter add dev pf0vf3 ingress protocol ip prio 20 \
+    flower src_ip 10.0.1.5 \
+    action pedit ex munge ip src set 1.2.3.4 \
+    action mirred egress redirect dev pf0vf0
+
+DNAT (ingress, on In VF representor — pf0vf0):
+  tc filter add dev pf0vf0 ingress protocol ip prio 20 \
+    flower dst_ip 1.2.3.4 ip_proto tcp dst_port 443 \
+    action pedit ex munge ip dst set 10.0.1.5 \
+    action mirred egress redirect dev pf0vf3
+
+Port Forward (ingress with port rewrite — pf0vf0):
+  tc filter add dev pf0vf0 ingress protocol ip prio 20 \
+    flower dst_ip 1.2.3.4 ip_proto tcp dst_port 8080 \
+    action pedit ex munge ip dst set 10.0.1.100 \
+    action pedit ex munge tcp dport set 80 \
+    action mirred egress redirect dev pf0vf3
+```
+
+When `in_hw=true`, these pedit+mirred rules execute entirely in the BF3 eSwitch
+silicon — zero ARM core or host CPU involvement for established NAT flows.
+
+### Production Implementation (DOCA Flow CT)
+
+In production, NAT is expressed as actions within the connection tracking (CT) entry
+programmed by the offload daemon:
+
+```
+CT Entry for inbound flow to Tenant A:
+  Match: dst_ip=1.2.3.4, dst_port=443, src_ip=client, src_port=X, proto=tcp
+  Actions:
+    - set_dst_ip(10.0.1.5)       # DNAT
+    - set_dst_port(443)          # (same port, or different for port forward)
+    - fwd(Out VF for Tenant A)   # deliver to tenant private network
+
+CT Entry for outbound reverse:
+  Match: src_ip=10.0.1.5, src_port=443, dst_ip=client, dst_port=X, proto=tcp
+  Actions:
+    - set_src_ip(1.2.3.4)       # SNAT (reverse direction)
+    - set_src_port(443)
+    - fwd(uplink)               # send to internet
+```
+
+This approach unifies NAT + forwarding + conntrack into a single hardware lookup,
+eliminating the need for separate pedit rules.
+
+### PoC-to-Production NAT Gap
+
+| Aspect | PoC (tc-flower pedit) | Production (DOCA Flow CT) |
+|--------|----------------------|--------------------------|
+| Statefulness | Stateless (fixed rewrite) | Stateful (per-connection NAT) |
+| Port allocation | Manual (operator specifies) | Dynamic (ephemeral port pool) |
+| Bidirectional | Requires 2 separate rules | Single CT entry covers both directions |
+| Conntrack integration | None | NAT is part of CT action set |
+| Scalability | Per-rule entries | Per-flow entries (millions) |
+| Principle proven | pedit in_hw=true at line rate | Same silicon, different programming API |
+
+---
+
 ## Appendix: Key Numbers
 
 | Parameter | Value |

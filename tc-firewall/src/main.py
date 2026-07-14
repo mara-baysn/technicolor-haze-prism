@@ -17,14 +17,19 @@ from fastapi.responses import JSONResponse
 
 from .models import (
     DefaultPolicy,
+    DNATRule,
     FirewallRule,
     FirewallRuleRequest,
     Metrics,
+    NATEntry,
+    PortForwardRule,
     Protocol,
     RuleAction,
+    SNATRule,
 )
 from . import tc_manager
 from . import conntrack
+from . import nat_manager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -255,6 +260,111 @@ async def get_topology():
         },
         "default_policy": default_policy.value,
     }
+
+
+# --- NAT Endpoints ---
+
+
+@app.post("/nat/snat", status_code=201)
+async def add_snat_rule(request: SNATRule):
+    """Add a source NAT rule (egress: tenant private IP -> public IP).
+
+    Creates a tc-flower rule on the client port (Out VF representor) that
+    rewrites src_ip from private to public and redirects to the internet port.
+    """
+    try:
+        entry = nat_manager.add_snat(
+            private_ip=request.private_ip,
+            public_ip=request.public_ip,
+            comment=request.comment,
+        )
+    except tc_manager.TcError as e:
+        raise HTTPException(status_code=500, detail=f"tc command failed: {e}")
+
+    logger.info(f"SNAT rule created: {request.private_ip} -> {request.public_ip}")
+    return entry
+
+
+@app.post("/nat/dnat", status_code=201)
+async def add_dnat_rule(request: DNATRule):
+    """Add a destination NAT rule (ingress: public IP:port -> private IP:port).
+
+    Creates a tc-flower rule on the internet port (In VF representor) that
+    rewrites dst_ip from public to private and redirects to the client port.
+    """
+    try:
+        entry = nat_manager.add_dnat(
+            public_ip=request.public_ip,
+            public_port=request.public_port,
+            private_ip=request.private_ip,
+            private_port=request.private_port,
+            protocol=request.protocol,
+            comment=request.comment,
+        )
+    except tc_manager.TcError as e:
+        raise HTTPException(status_code=500, detail=f"tc command failed: {e}")
+
+    logger.info(
+        f"DNAT rule created: {request.public_ip}:{request.public_port} -> "
+        f"{request.private_ip}:{request.private_port}"
+    )
+    return entry
+
+
+@app.post("/nat/forward", status_code=201)
+async def add_port_forward_rule(request: PortForwardRule):
+    """Add a port forwarding rule (public:port -> private:different_port).
+
+    Like DNAT but also rewrites the destination port. Creates a tc-flower rule
+    on the internet port with pedit actions for both dst_ip and dst_port.
+    """
+    try:
+        entry = nat_manager.add_port_forward(
+            public_ip=request.public_ip,
+            public_port=request.public_port,
+            private_ip=request.private_ip,
+            private_port=request.private_port,
+            protocol=request.protocol,
+            comment=request.comment,
+        )
+    except tc_manager.TcError as e:
+        raise HTTPException(status_code=500, detail=f"tc command failed: {e}")
+
+    logger.info(
+        f"Port forward rule created: {request.public_ip}:{request.public_port} -> "
+        f"{request.private_ip}:{request.private_port}"
+    )
+    return entry
+
+
+@app.get("/nat")
+async def list_nat_rules():
+    """List all NAT rules (SNAT, DNAT, and port forward)."""
+    rules = nat_manager.list_nat()
+    return {
+        "rules": rules,
+        "count": len(rules),
+    }
+
+
+@app.delete("/nat/{rule_id}")
+async def delete_nat_rule(rule_id: str):
+    """Remove a NAT rule by ID."""
+    try:
+        nat_manager.remove_nat(rule_id)
+    except tc_manager.TcError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    logger.info(f"Deleted NAT rule {rule_id}")
+    return {"status": "deleted", "rule_id": rule_id}
+
+
+@app.post("/nat/flush")
+async def flush_nat_rules():
+    """Remove all NAT rules (SNAT, DNAT, and port forward)."""
+    count = nat_manager.flush_nat()
+    logger.warning(f"NAT FLUSH: removed {count} rules")
+    return {"status": "flushed", "rules_removed": count}
 
 
 if __name__ == "__main__":
