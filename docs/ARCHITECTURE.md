@@ -125,7 +125,7 @@ PCIe topology, VF triplet mapping, and the shared DPU offload daemon.
 |  |  |  +----------------------------------------------------------------------+  | | |
 |  |  |                                                                            | | |
 |  |  |  +------------------------------+   +-----------------------------------+  | | |
-|  |  |  |  ARM A78 Cores (16)         |   |  Uplinks (2x100G)                 |  | | |
+|  |  |  |  ARM A78 Cores (16)         |   |  Uplinks (2x200G QSFP112)                 |  | | |
 |  |  |  |  +------------------------+ |   |  +----+    +----+                 |  | | |
 |  |  |  |  | Offload Daemon (gRPC)  | |   |  | P0 |    | P1 |                 |  | | |
 |  |  |  |  | - ONE daemon for ALL   | |   |  +--+-+    +--+-+                 |  | | |
@@ -219,7 +219,7 @@ sequenceDiagram
 
     ESW->>TNET: 5. Direct forward at line rate via Out VF-A<br/>(DNATed packet to 10.0.1.5:443)
 
-    Note over INT,TNET: Latency: < 5 microseconds<br/>Throughput: up to NIC line rate (200G per BF3)<br/>CPU: 0% (Tenant A VM idle for this flow)
+    Note over INT,TNET: Latency: < 5 microseconds<br/>Throughput: up to NIC line rate (400G per BF3)<br/>CPU: 0% (Tenant A VM idle for this flow)
 ```
 
 **Return path (Tenant A → Internet) also offloaded:**
@@ -584,7 +584,7 @@ sequenceDiagram
 | CPU cores | 2-4 (DPDK pinned) | — | 166 × 3 = 498 cores (fits 512) |
 | RAM | 4-8 GB (hugepages) | — | 166 × 6 GB = 996 GB (fits 1TB) |
 | Session table entries | ~50K per tenant | 4M per DPU | 8M per host |
-| Bandwidth (offloaded) | Up to 100 Gbps | 200 Gbps line rate | 400 Gbps |
+| Bandwidth (offloaded) | Up to 100 Gbps | 400 Gbps line rate | 400 Gbps |
 
 ### VF Allocation Scheme
 
@@ -910,7 +910,7 @@ PER-TENANT THROUGHPUT:
 |  | (70-80%)  |                                                    |
 |  +-----------+                                                    |
 |       |                                                           |
-|       |  Hardware throughput: up to 200 Gbps per DPU              |
+|       |  Hardware throughput: up to 400 Gbps per DPU              |
 |       |  (ASAP2, zero CPU, line rate)                             |
 |       v                                                           |
 |                                                                    |
@@ -923,12 +923,12 @@ PER-TENANT THROUGHPUT:
 +------------------------------------------------------------------+
 
 AGGREGATE per DPU (83 tenants):
-  - Line rate: 200 Gbps (BF3 B3220, 2x100G)
+  - Line rate: 400 Gbps (BF3 B3220L, 2x200G QSFP112)
   - All tenants share line rate for offloaded flows
   - Oversubscription: 83 tenants x 100G SLA = 8.3 Tbps committed
-    vs 200G physical = 41.5:1 oversubscription on the DPU
+    vs 400G physical = 41.5:1 oversubscription on the DPU
   - Works because: most tenants don't burst simultaneously
-  - Burst capacity: any single tenant can burst to full 200G
+  - Burst capacity: any single tenant can burst to full 400G
     (if others are idle)
 ```
 
@@ -959,7 +959,7 @@ VM inspection capacity (16 cores DPDK):
 +------------------------------------------------------------------+
 | Bottleneck              | Limit            | Mitigation           |
 |-------------------------|------------------|----------------------|
-| DPU line rate           | 200 Gbps (2x100G)| Scale-out: add DPUs |
+| DPU line rate           | 400 Gbps (2x200G QSFP112)| Scale-out: add DPUs |
 | Session table entries   | 2-16M per DPU    | Per-tenant quota     |
 | PCIe bandwidth (host)   | ~256 Gbps (Gen5) | NUMA alignment       |
 | VM inspection cores     | 16 per VM        | Increase cores or    |
@@ -1001,5 +1001,5 @@ SCALING STRATEGY:
 | Offload daemon | 1 per DPU (shared, serves all tenant VMs) |
 | Recovery SLO (Standard) | 8-15 seconds (cold failover) |
 | Recovery SLO (Premium) | < 1 second (active-standby) |
-| BF3 SKU | B3220 (2x100G, ConnectX-7 based) |
+| BF3 SKU | B3220L (2x200G QSFP112, ConnectX-7 based) |
 | Fail mode default | Fail-closed (new flows dropped) |
